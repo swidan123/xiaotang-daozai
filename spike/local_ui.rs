@@ -2432,7 +2432,8 @@ impl LocalPlugins {
                             let pill_w = 10.0 + swatch_w + 7.0 + text_w + 11.0;
                             let (rect, resp) =
                                 ui.allocate_exact_size(egui::vec2(pill_w, 30.0), egui::Sense::click());
-                            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if resp.clicked() {
                                 selected_color = col;
                             }
                             let hovered = resp.hovered();
