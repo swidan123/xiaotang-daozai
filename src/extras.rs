@@ -1402,6 +1402,155 @@ fn settings_toggle_chip(ui:&mut egui::Ui,text:&str,on:bool)->egui::Response{
     let stroke=if on{egui::Stroke::NONE}else{egui::Stroke::new(1.0,settings_color(ctx,Color32::from_rgb(60,60,66),Color32::from_rgb(214,218,225)))};
     ui.add(egui::Button::new(egui::RichText::new(label).size(12.0).color(fg)).fill(fill).stroke(stroke).corner_radius(13.0).min_size(egui::vec2(0.0,26.0)))
 }
+
+/// 歌词已唱颜色选择器 + 实时效果预览条。
+fn lyric_color_picker(
+    ui: &mut egui::Ui,
+    selected: &mut crate::model::LyricColor,
+    custom_rgb: &mut [u8; 3],
+    t: f64,
+    enabled: bool,
+) {
+    use crate::model::LyricColor;
+    let ctx = &ui.ctx().clone();
+    ui.label(
+        egui::RichText::new("已唱颜色")
+            .size(13.0)
+            .color(settings_color(ctx, Color32::WHITE, Color32::from_rgb(30, 34, 41))),
+    );
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        for &style in &LyricColor::ALL {
+            let active = *selected == style;
+            let text_col = if active {
+                settings_color(ctx, Color32::WHITE, Color32::from_rgb(20, 24, 31))
+            } else {
+                settings_color(ctx, Color32::from_gray(205), Color32::from_gray(65))
+            };
+            let galley = ui.painter().layout_no_wrap(
+                style.label().to_owned(),
+                egui::FontId::proportional(12.0),
+                text_col,
+            );
+            let pill_w = 10.0 + 14.0 + 6.0 + galley.size().x + 10.0;
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(pill_w, 28.0), egui::Sense::click());
+            let hovered = resp.hovered();
+            let bg = if active {
+                settings_color(ctx, Color32::from_rgb(50, 56, 72), Color32::from_rgb(232, 240, 254))
+            } else if hovered {
+                settings_color(ctx, Color32::from_rgb(48, 48, 54), Color32::from_rgb(238, 241, 246))
+            } else {
+                settings_color(ctx, Color32::from_rgb(38, 38, 42), Color32::from_rgb(246, 247, 250))
+            };
+            let border = if active {
+                egui::Stroke::new(1.5, settings_color(ctx, Color32::from_rgb(96, 165, 250), Color32::from_rgb(59, 130, 246)))
+            } else {
+                egui::Stroke::new(1.0, settings_color(ctx, Color32::from_rgb(58, 58, 64), Color32::from_rgb(220, 224, 230)))
+            };
+            ui.painter().rect(rect, 14.0, bg, border, egui::StrokeKind::Inside);
+
+            // 左侧色点（渐变风格分多段画出彩色胶囊，纯色画实心圆）。
+            let dot = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + 8.0, rect.center().y - 6.0),
+                egui::vec2(14.0, 12.0),
+            );
+            if style.is_gradient() {
+                let segs = 6;
+                let seg_w = dot.width() / segs as f32;
+                for s in 0..segs {
+                    let u = (s as f32 + 0.5) / segs as f32;
+                    let col = style.color_at(u, 0.0, *custom_rgb);
+                    let r = egui::Rect::from_min_max(
+                        egui::pos2(dot.left() + seg_w * s as f32, dot.top()),
+                        egui::pos2(dot.left() + seg_w * (s + 1) as f32 + 0.5, dot.bottom()),
+                    );
+                    let cr = if s == 0 {
+                        egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }
+                    } else if s + 1 == segs {
+                        egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 }
+                    } else {
+                        egui::CornerRadius::ZERO
+                    };
+                    ui.painter().rect_filled(r, cr, col);
+                }
+            } else {
+                let col = style.color_at(0.5, 0.0, *custom_rgb);
+                ui.painter().circle_filled(dot.center(), 6.0, col);
+            }
+            ui.painter().galley(
+                egui::pos2(dot.right() + 6.0, rect.center().y - galley.size().y / 2.0),
+                galley,
+                text_col,
+            );
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                *selected = style;
+            }
+        }
+    });
+
+    if *selected == LyricColor::Custom {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("自选颜色")
+                    .size(12.0)
+                    .color(settings_color(ctx, Color32::from_gray(185), Color32::from_gray(85))),
+            );
+            ui.color_edit_button_srgb(custom_rgb);
+            ui.label(
+                egui::RichText::new(crate::model::format_hex_rgb(*custom_rgb))
+                    .size(12.0)
+                    .monospace()
+                    .color(settings_color(ctx, Color32::from_gray(180), Color32::from_gray(95))),
+            );
+        });
+    }
+
+    // 实时预览条：模拟岛上深色歌词胶囊，直观展示当前所选配色的推进效果。
+    ui.add_space(8.0);
+    let preview_w = ui.available_width().min(360.0).max(200.0);
+    let (bar, _) = ui.allocate_exact_size(egui::vec2(preview_w, 32.0), egui::Sense::hover());
+    ui.painter().rect(
+        bar,
+        16.0,
+        Color32::from_rgb(44, 44, 48),
+        egui::Stroke::new(1.0, Color32::from_white_alpha(28)),
+        egui::StrokeKind::Inside,
+    );
+    let sample = "你一句轻描淡写就能让我彻夜难平";
+    let font = crate::theme::font(12.0, crate::theme::W::Semibold);
+    let galley = ui.painter().layout_no_wrap(sample.to_owned(), font, Color32::WHITE);
+    let pos = egui::pos2(bar.center().x - galley.size().x / 2.0, bar.center().y - galley.size().y / 2.0);
+    if enabled {
+        let demo_progress = if crate::bar_layout::animations_enabled() {
+            ((t * 0.25) % 1.0) as f32
+        } else {
+            0.55
+        };
+        let phase = if crate::bar_layout::animations_enabled() {
+            (t * 0.22) as f32
+        } else {
+            0.0
+        };
+        crate::paint::karaoke_galley(
+            &ui.painter().with_clip_rect(bar.shrink(4.0)),
+            pos,
+            galley,
+            Color32::WHITE,
+            *selected,
+            *custom_rgb,
+            demo_progress,
+            phase,
+            false,
+        );
+        if crate::bar_layout::animations_enabled() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        }
+    } else {
+        ui.painter().with_clip_rect(bar.shrink(4.0)).galley(pos, galley, Color32::WHITE);
+    }
+}
 /// 功能页面对应的图标，与侧栏同一套。
 /// 纹理缓存只按地址区分、不分尺寸：侧栏 23px 先加载后，36px 的卡片图标会被放大发糊，所以这里用独立地址。
 fn settings_page_icon(page:usize)->egui::ImageSource<'static>{
@@ -2314,6 +2463,12 @@ impl App {
                                 let mut advance=-self.settings.lyric_delay_ms as f64/1000.0;
                                 if setting_number(ui,"时间偏移",&mut advance,-5.0,5.0," 秒",0.1){self.settings.lyric_delay_ms=(-advance*1000.0).round()as i32;}
                                 settings_hint(ui,"歌词和歌声对不上时调整：正数提前，负数延后；默认提前 0.35 秒。");
+                                ui.separator();
+                                setting_row(ui,"歌词逐字变色","未唱保持白色，唱过的部分按所选颜色推进；支持岛上歌词与展开歌词",&mut self.settings.lyric_karaoke);
+                                ui.add_enabled_ui(self.settings.lyric_karaoke,|ui|{
+                                    ui.add_space(6.0);
+                                    lyric_color_picker(ui,&mut self.settings.lyric_color,&mut self.settings.lyric_custom_color,self.t,self.settings.lyric_karaoke);
+                                });
                             });
                         });
                     }

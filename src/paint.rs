@@ -14,6 +14,133 @@ pub enum H {
     Right,
 }
 
+/// 逐字/逐行卡拉 OK 变色绘制：
+/// - 未唱部分保持 `unsung`（通常为白色）；
+/// - 已唱部分按 `style`（单色 / 自定义 / 彩虹与渐变）填充，并通过互补裁剪区精确切分，
+///   避免双层抗锯齿叠画产生的白边。
+#[allow(clippy::too_many_arguments)]
+pub fn karaoke_galley(
+    painter: &egui::Painter,
+    position: Pos2,
+    galley: std::sync::Arc<egui::Galley>,
+    unsung: Color32,
+    style: crate::model::LyricColor,
+    custom_rgb: [u8; 3],
+    progress: f32,
+    phase: f32,
+    rtl: bool,
+) {
+    if galley.is_empty() {
+        return;
+    }
+    let progress = progress.clamp(0.0, 1.0);
+    if progress <= 0.001 {
+        painter.galley(position, galley, unsung);
+        return;
+    }
+
+    let mut colored = galley.clone();
+    let (global_min_x, global_max_x) = {
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for row in &colored.rows {
+            if row.visuals.mesh_bounds.is_positive() {
+                lo = lo.min(row.visuals.mesh_bounds.min.x);
+                hi = hi.max(row.visuals.mesh_bounds.max.x);
+            }
+        }
+        if lo.is_finite() && hi > lo { (lo, hi) } else { (0.0, 1.0) }
+    };
+    for row in &mut std::sync::Arc::make_mut(&mut colored).rows {
+        let (min_x, max_x) = if row.visuals.mesh_bounds.is_positive() {
+            (row.visuals.mesh_bounds.min.x, row.visuals.mesh_bounds.max.x)
+        } else {
+            (global_min_x, global_max_x)
+        };
+        let width = (max_x - min_x).max(1.0);
+        for vertex in &mut row.visuals.mesh.vertices {
+            let mut u = ((vertex.pos.x - min_x) / width).clamp(0.0, 1.0);
+            if rtl {
+                u = 1.0 - u;
+            }
+            let col = style.color_at(u, phase, custom_rgb);
+            let a = vertex.color.a() as f32 / 255.0;
+            vertex.color = if a < 0.999 { col.gamma_multiply(a) } else { col };
+        }
+    }
+
+    if progress >= 0.999 {
+        painter.galley(position, colored, Color32::WHITE);
+        return;
+    }
+
+    let total_w: f32 = galley
+        .rows
+        .iter()
+        .map(|row| row.visuals.mesh_bounds.width().max(0.0))
+        .sum();
+    if total_w <= 0.0 {
+        painter.galley(position, galley, unsung);
+        return;
+    }
+
+    let base_clip = painter.clip_rect();
+    let mut remaining = total_w * progress;
+    let row_count = galley.rows.len();
+    for (i, row) in galley.rows.iter().enumerate() {
+        let b = row.visuals.mesh_bounds;
+        let top = if i == 0 {
+            base_clip.top()
+        } else {
+            ((position.y + galley.rows[i - 1].visuals.mesh_bounds.max.y) + (position.y + b.min.y)) * 0.5
+        };
+        let bottom = if i + 1 == row_count {
+            base_clip.bottom()
+        } else {
+            ((position.y + b.max.y) + (position.y + galley.rows[i + 1].visuals.mesh_bounds.min.y)) * 0.5
+        };
+        let row_w = b.width().max(0.0);
+        if remaining >= row_w {
+            let clip = Rect::from_min_max(Pos2::new(base_clip.left(), top), Pos2::new(base_clip.right(), bottom))
+                .intersect(base_clip);
+            if clip.is_positive() {
+                painter.with_clip_rect(clip).galley(position, colored.clone(), Color32::WHITE);
+            }
+            remaining -= row_w;
+        } else if remaining <= 0.0 {
+            let clip = Rect::from_min_max(Pos2::new(base_clip.left(), top), Pos2::new(base_clip.right(), bottom))
+                .intersect(base_clip);
+            if clip.is_positive() {
+                painter.with_clip_rect(clip).galley(position, galley.clone(), unsung);
+            }
+        } else {
+            let row_left = position.x + b.min.x;
+            let row_right = position.x + b.max.x;
+            let split_x = if rtl { row_right - remaining } else { row_left + remaining };
+            let left_clip = Rect::from_min_max(Pos2::new(base_clip.left(), top), Pos2::new(split_x, bottom))
+                .intersect(base_clip);
+            let right_clip = Rect::from_min_max(Pos2::new(split_x, top), Pos2::new(base_clip.right(), bottom))
+                .intersect(base_clip);
+            if rtl {
+                if right_clip.is_positive() {
+                    painter.with_clip_rect(right_clip).galley(position, colored.clone(), Color32::WHITE);
+                }
+                if left_clip.is_positive() {
+                    painter.with_clip_rect(left_clip).galley(position, galley.clone(), unsung);
+                }
+            } else {
+                if left_clip.is_positive() {
+                    painter.with_clip_rect(left_clip).galley(position, colored.clone(), Color32::WHITE);
+                }
+                if right_clip.is_positive() {
+                    painter.with_clip_rect(right_clip).galley(position, galley.clone(), unsung);
+                }
+            }
+            remaining = 0.0;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Card<'a> {
     pub ui: &'a egui::Ui,

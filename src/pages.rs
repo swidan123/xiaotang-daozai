@@ -310,7 +310,13 @@ impl App {
                 job.wrap.break_anywhere=true;
                 let galley=row.painter.layout_job(job);
                 let y=64.0+distance*29.0-galley.size().y/(2.0*c.s);
-                row.painter.galley(row.pos(246.0,y),galley,ink);
+                if active && lyrics.synced && self.settings.lyric_karaoke {
+                    let progress=lyrics.line_progress(index,self.lyric_position(),self.media.duration as f32);
+                    let phase=if crate::bar_layout::animations_enabled() {(self.t*0.22) as f32}else{0.0};
+                    paint::karaoke_galley(&row.painter,row.pos(246.0,y),galley,ink,self.settings.lyric_color,self.settings.lyric_custom_color,progress,phase,crate::rtl_text::has_rtl(&line.text));
+                } else {
+                    row.painter.galley(row.pos(246.0,y),galley,ink);
+                }
             }
             if !lyrics.synced {col.text(246.0,39.0,"文本歌词",8.0,W::Regular,theme::GRAY,H::Left);}
         } else {

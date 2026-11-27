@@ -142,6 +142,167 @@ pub enum IslandShape {
     Pill,
 }
 
+/// 歌词逐字变色的已唱配色风格：未唱保持白色，已唱按所选配色从左到右推进。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LyricColor {
+    /// 彩虹流光（多色横向渐变，轻微动态流光）
+    #[default]
+    Rainbow,
+    /// 极光渐变（薄荷青 → 天蓝 → 紫罗兰）
+    Aurora,
+    /// 晚霞渐变（暖金 → 珊瑚橙 → 玫红）
+    Sunset,
+    /// 晴空蓝
+    SkyBlue,
+    /// 樱花粉
+    SakuraPink,
+    /// 薄荷绿
+    MintGreen,
+    /// 琥珀金
+    AmberGold,
+    /// 电光紫
+    NeonPurple,
+    /// 自定义单色
+    Custom,
+}
+
+impl LyricColor {
+    pub const ALL: [LyricColor; 9] = [
+        Self::Rainbow,
+        Self::Aurora,
+        Self::Sunset,
+        Self::SkyBlue,
+        Self::SakuraPink,
+        Self::MintGreen,
+        Self::AmberGold,
+        Self::NeonPurple,
+        Self::Custom,
+    ];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Rainbow => "rainbow",
+            Self::Aurora => "aurora",
+            Self::Sunset => "sunset",
+            Self::SkyBlue => "sky_blue",
+            Self::SakuraPink => "sakura_pink",
+            Self::MintGreen => "mint_green",
+            Self::AmberGold => "amber_gold",
+            Self::NeonPurple => "neon_purple",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "rainbow" => Self::Rainbow,
+            "aurora" => Self::Aurora,
+            "sunset" => Self::Sunset,
+            "sky_blue" => Self::SkyBlue,
+            "sakura_pink" => Self::SakuraPink,
+            "mint_green" => Self::MintGreen,
+            "amber_gold" => Self::AmberGold,
+            "neon_purple" => Self::NeonPurple,
+            "custom" => Self::Custom,
+            _ => Self::Rainbow,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rainbow => "彩虹",
+            Self::Aurora => "极光",
+            Self::Sunset => "晚霞",
+            Self::SkyBlue => "晴空蓝",
+            Self::SakuraPink => "樱花粉",
+            Self::MintGreen => "薄荷绿",
+            Self::AmberGold => "琥珀金",
+            Self::NeonPurple => "电光紫",
+            Self::Custom => "自定义",
+        }
+    }
+
+    pub fn is_gradient(self) -> bool {
+        matches!(self, Self::Rainbow | Self::Aurora | Self::Sunset)
+    }
+
+    /// 采样横向位置 `u`（0..=1）的颜色；渐变模式支持按 `phase` 轻微流动。
+    pub fn color_at(self, u: f32, phase: f32, custom: [u8; 3]) -> eframe::egui::Color32 {
+        use eframe::egui::Color32;
+        let lerp_stops = |stops: &[[u8; 3]], t: f32| -> Color32 {
+            let n = stops.len();
+            let scaled = t.clamp(0.0, 1.0) * (n - 1) as f32;
+            let idx = (scaled.floor() as usize).min(n - 2);
+            let frac = scaled - idx as f32;
+            let a = stops[idx];
+            let b = stops[idx + 1];
+            Color32::from_rgb(
+                (a[0] as f32 + (b[0] as f32 - a[0] as f32) * frac).round() as u8,
+                (a[1] as f32 + (b[1] as f32 - a[1] as f32) * frac).round() as u8,
+                (a[2] as f32 + (b[2] as f32 - a[2] as f32) * frac).round() as u8,
+            )
+        };
+        let u = u.clamp(0.0, 1.0);
+        match self {
+            Self::Rainbow => {
+                // 首尾相连的明亮彩虹色带，支持无缝缓慢流光。
+                const STOPS: [[u8; 3]; 7] = [
+                    [255, 96, 134],
+                    [255, 166, 68],
+                    [255, 226, 89],
+                    [82, 232, 152],
+                    [72, 202, 255],
+                    [180, 124, 255],
+                    [255, 96, 134],
+                ];
+                let shifted = (u + phase).rem_euclid(1.0);
+                lerp_stops(&STOPS, shifted)
+            }
+            Self::Aurora => {
+                const STOPS: [[u8; 3]; 4] = [
+                    [62, 245, 212],
+                    [68, 178, 255],
+                    [184, 124, 255],
+                    [62, 245, 212],
+                ];
+                let shifted = (u * 0.72 + phase * 0.5).rem_euclid(1.0);
+                lerp_stops(&STOPS, shifted)
+            }
+            Self::Sunset => {
+                const STOPS: [[u8; 3]; 4] = [
+                    [255, 224, 102],
+                    [255, 132, 82],
+                    [255, 79, 147],
+                    [255, 224, 102],
+                ];
+                let shifted = (u * 0.72 + phase * 0.5).rem_euclid(1.0);
+                lerp_stops(&STOPS, shifted)
+            }
+            Self::SkyBlue => Color32::from_rgb(56, 189, 248),
+            Self::SakuraPink => Color32::from_rgb(255, 119, 183),
+            Self::MintGreen => Color32::from_rgb(69, 230, 155),
+            Self::AmberGold => Color32::from_rgb(255, 201, 77),
+            Self::NeonPurple => Color32::from_rgb(192, 132, 252),
+            Self::Custom => Color32::from_rgb(custom[0], custom[1], custom[2]),
+        }
+    }
+}
+
+pub fn parse_hex_rgb(raw: &str) -> Option<[u8; 3]> {
+    let s = raw.trim().strip_prefix('#').unwrap_or(raw.trim());
+    if s.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some([r, g, b])
+}
+
+pub fn format_hex_rgb(rgb: [u8; 3]) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
+}
+
 impl IslandShape {
     pub const ALL: [IslandShape; 2] = [IslandShape::Notch, IslandShape::Pill];
     pub fn key(self) -> &'static str {
@@ -289,6 +450,12 @@ pub struct Settings {
     pub lyrics_enabled:bool,
     pub island_lyrics:bool,
     pub lyric_delay_ms:i32,
+    /// 歌词逐字变色开关（卡拉 OK 进度推进）。
+    pub lyric_karaoke: bool,
+    /// 歌词已唱部分的配色风格（支持彩虹/渐变与多种纯色/自定义）。
+    pub lyric_color: LyricColor,
+    /// 自定义歌词颜色（`lyric_color == LyricColor::Custom` 时使用）。
+    pub lyric_custom_color: [u8; 3],
     pub hide_fullscreen: bool,
     pub exclude_from_capture: bool,
     /// 启用顶栏适配，按显示方式避让顶栏或保持岛体在顶栏上方。
@@ -337,7 +504,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,true,false,true], page_order: [0,1,2,3,4,5,6,7,8,9,10], show_page_shortcuts: true, show_clock: true, resident_date: ResidentDate::Off, show_battery: true, show_weather: true, show_performance: true, performance_bar: Default::default(), performance_metrics: 7, performance_view: Default::default(), clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, show_bluetooth:true, bluetooth_pinned:Vec::new(), bluetooth_resident_style:0, bluetooth_resident_custom:false, bluetooth_battery_notifications:true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, exclude_from_capture: false, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code_only_notifications: false, mail_code: true, mail_code_popup: false, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,true,false,true], page_order: [0,1,2,3,4,5,6,7,8,9,10], show_page_shortcuts: true, show_clock: true, resident_date: ResidentDate::Off, show_battery: true, show_weather: true, show_performance: true, performance_bar: Default::default(), performance_metrics: 7, performance_view: Default::default(), clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, show_bluetooth:true, bluetooth_pinned:Vec::new(), bluetooth_resident_style:0, bluetooth_resident_custom:false, bluetooth_battery_notifications:true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, lyric_karaoke: true, lyric_color: LyricColor::Rainbow, lyric_custom_color: [56, 189, 248], hide_fullscreen: true, exclude_from_capture: false, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code_only_notifications: false, mail_code: true, mail_code_popup: false, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
     }
 }
 
@@ -447,6 +614,13 @@ impl Settings {
                 "lyrics_enabled" => s.lyrics_enabled=v!="0",
                 "island_lyrics" => s.island_lyrics=v=="1",
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
+                "lyric_karaoke" => s.lyric_karaoke = v != "0",
+                "lyric_color" => s.lyric_color = LyricColor::parse(&v),
+                "lyric_custom_color" => {
+                    if let Some(rgb) = parse_hex_rgb(&v) {
+                        s.lyric_custom_color = rgb;
+                    }
+                }
                 "hide_fullscreen" => s.hide_fullscreen = v != "0",
                 "exclude_from_capture" => s.exclude_from_capture = v == "1",
                 "avoid_top_bar" => s.avoid_top_bar = v != "0",
@@ -545,6 +719,9 @@ impl Settings {
                 ("lyrics_enabled".into(),(self.lyrics_enabled as u8).to_string()),
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
+                ("lyric_karaoke".into(), (self.lyric_karaoke as u8).to_string()),
+                ("lyric_color".into(), self.lyric_color.key().into()),
+                ("lyric_custom_color".into(), format_hex_rgb(self.lyric_custom_color)),
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
                 ("exclude_from_capture".into(), (self.exclude_from_capture as u8).to_string()),
                 ("avoid_top_bar".into(), (self.avoid_top_bar as u8).to_string()),

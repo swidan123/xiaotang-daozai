@@ -2633,6 +2633,54 @@ fn lyric_short_gap_and_line_switch_keep_text_visible(){
 }
 
 #[test]
+fn karaoke_lyrics_color_sweep_and_settings_persist() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    h.app.settings.island_lyrics = true;
+    h.app.settings.lyric_karaoke = true;
+    h.app.settings.lyric_color = crate::model::LyricColor::Rainbow;
+    h.app.settings.lyric_custom_color = [255, 128, 64];
+    h.app.settings.save();
+    let loaded = crate::model::Settings::load();
+    assert!(loaded.lyric_karaoke);
+    assert_eq!(loaded.lyric_color, crate::model::LyricColor::Rainbow);
+    assert_eq!(loaded.lyric_custom_color, [255, 128, 64]);
+
+    h.media = crate::smtc::NowPlaying {
+        title: "Track".into(),
+        artist: "Artist".into(),
+        position: 12.0,
+        duration: 120.0,
+        playing: true,
+        ..Default::default()
+    };
+    h.app.set_lyrics("Track", "Artist", 120.0, crate::lyrics::parse_lrc("[00:10.00]你一句轻描淡写就能让我彻夜难平\n[00:15.00]下一句"));
+    for _ in 0..10 { h.frame(vec![]); }
+
+    // 播放到句中：应拆成已唱（彩色）与未唱（白色）两段互补裁剪区。
+    let lyric_shapes: Vec<_> = h.shapes.iter().filter_map(|s| match &s.shape {
+        egui::Shape::Text(t) if t.galley.text() == "你一句轻描淡写就能让我彻夜难平" => Some((s.clip_rect, t)),
+        _ => None,
+    }).collect();
+    assert_eq!(lyric_shapes.len(), 2, "逐字变色在句中应拆分已唱与未唱两个裁剪区");
+    let first_col = lyric_shapes[0].1.galley.rows[0].visuals.mesh.vertices[0].color;
+    let second_col = lyric_shapes[1].1.galley.rows[0].visuals.mesh.vertices[0].color;
+    assert_ne!(first_col, second_col, "已唱部分应为彩色，未唱部分保持白色");
+    assert!((lyric_shapes[0].0.right() - lyric_shapes[1].0.left()).abs() < 0.1, "两段裁剪区应无缝衔接不重叠");
+
+    // 关闭逐字变色后回到单段纯白绘制。
+    h.app.settings.lyric_karaoke = false;
+    h.app.settings.save();
+    assert!(!crate::model::Settings::load().lyric_karaoke);
+    h.frame(vec![]);
+    let plain_shapes: Vec<_> = h.shapes.iter().filter_map(|s| match &s.shape {
+        egui::Shape::Text(t) if t.galley.text() == "你一句轻描淡写就能让我彻夜难平" => Some(t),
+        _ => None,
+    }).collect();
+    assert_eq!(plain_shapes.len(), 1, "关闭逐字变色后应仅绘制一段纯白歌词");
+}
+
+#[test]
 fn island_lyrics_center_segments_in_a_fixed_height(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();h.app.settings.island_lyrics=true;

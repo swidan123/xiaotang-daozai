@@ -196,6 +196,7 @@ mod archive {
                 | "qq_only"
                 | "lyrics_enabled"
                 | "island_lyrics"
+                | "lyric_karaoke"
                 | "render_compat"
                 | "calendar_auto_sync"
                 | "mail_enabled" => flag,

@@ -54,7 +54,10 @@ fn select(raw:&str,title:&str,artist:&str,duration:f64)->Option<Lyrics>{
     }
     // 文件自身的校准量属于原生时间轴，用户的提前量仍由界面单独应用。
     let offset=header(raw,"offset").and_then(|s|s.parse::<i32>().ok()).unwrap_or_default() as f32/1000.0;
-    for line in &mut lyrics.lines{line.t=(line.t+offset).max(0.0);}
+    for line in &mut lyrics.lines{
+        line.t=(line.t+offset).max(0.0);
+        if let Some(end)=&mut line.end{*end=(*end+offset).max(0.0);}
+    }
     Some(lyrics)
 }
 
