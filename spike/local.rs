@@ -925,6 +925,20 @@ impl Package {
 
     pub(super) fn lyrics_style(&self, values: &Values) -> Result<crate::model::LyricsStyle> {
         let layout = self.lyrics_style_entry()?;
+        let mut bound_keys = std::collections::HashSet::new();
+        for key in [
+            layout.island_setting.as_deref(),
+            layout.expanded_setting.as_deref(),
+            layout.color_setting.as_deref(),
+            layout.custom_color_setting.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !bound_keys.insert(key) {
+                return Err(fail("歌词样式的不同设置槽位不能重复绑定同一个设置键"));
+            }
+        }
         let default_color = crate::model::LyricColor::try_parse(&layout.default_color)
             .ok_or_else(|| fail("歌词样式默认颜色无效"))?;
         let default_custom = crate::model::parse_hex_rgb(&layout.default_custom_color)
@@ -991,6 +1005,70 @@ impl Package {
             }
         }
         Ok(style)
+    }
+
+    /// 将旧版 `lyrics.style`（例如 v1.0.0 的 `enabled`/`expanded` + `choice` 颜色）的已保存设置
+    /// 原子迁移到新版同语义槽位（如 `island_enabled`/`expanded_enabled` + `text` 颜色）。
+    /// 若存在未映射的旧字段被删改，或已保存的值与新字段不兼容，返回 `None`，由调用方按常规拒绝。
+    pub(super) fn migrate_lyrics_style_values(&self, new_pkg: &Package, old_values: &Values) -> Option<Values> {
+        if !self.manifest.is_lyrics_style() || !new_pkg.manifest.is_lyrics_style() {
+            return None;
+        }
+        let old_entry = self.lyrics_style_entry().ok()?;
+        let new_entry = new_pkg.lyrics_style_entry().ok()?;
+        let slot_pairs = [
+            (old_entry.island_setting.as_deref(), new_entry.island_setting.as_deref(), false),
+            (old_entry.expanded_setting.as_deref(), new_entry.expanded_setting.as_deref(), false),
+            (old_entry.color_setting.as_deref(), new_entry.color_setting.as_deref(), true),
+            (old_entry.custom_color_setting.as_deref(), new_entry.custom_color_setting.as_deref(), false),
+        ];
+        // 旧清单中的每个字段：要么新清单保留同 key + 同 kind，要么属于上述语义槽位且新版仍声明该槽位。
+        let old_slot_mapped = |old_key: &str| {
+            slot_pairs
+                .iter()
+                .any(|&(o, n, _)| o == Some(old_key) && n.is_some())
+        };
+        if !self.manifest.settings.iter().all(|prev| {
+            old_slot_mapped(&prev.key)
+                || new_pkg
+                    .manifest
+                    .settings
+                    .iter()
+                    .any(|f| f.key == prev.key && f.kind == prev.kind)
+        }) {
+            return None;
+        }
+        let mut migrated = new_pkg.settings_values(old_values);
+        // 保留的非槽位字段值也必须兼容。
+        for (k, v) in old_values {
+            if !old_slot_mapped(k) && migrated.get(k) != Some(v) {
+                return None;
+            }
+        }
+        for (old_opt, new_opt, is_color) in slot_pairs {
+            let (Some(old_k), Some(new_k)) = (old_opt, new_opt) else {
+                continue;
+            };
+            let old_val = old_values
+                .get(old_k)
+                .or_else(|| {
+                    self.manifest
+                        .settings
+                        .iter()
+                        .find(|f| f.key == old_k)
+                        .map(|f| &f.default)
+                })?;
+            let new_field = new_pkg.manifest.settings.iter().find(|f| f.key == new_k)?;
+            if !valid_field(new_field, old_val) {
+                return None;
+            }
+            if is_color && crate::model::LyricColor::try_parse(old_val).is_none() {
+                return None;
+            }
+            migrated.insert(new_k.to_owned(), old_val.clone());
+        }
+        new_pkg.lyrics_style(&migrated).ok()?;
+        Some(migrated)
     }
 
     fn mail_view(&self, values: &Values) -> Result<crate::mail_manage_ui::MailView> {

@@ -2339,6 +2339,13 @@ impl LocalPlugins {
     fn lyrics_style_settings_card(&mut self, ui: &mut egui::Ui, id: &str) {
         use crate::model::{format_hex_rgb, parse_hex_rgb, LyricColor};
 
+        #[derive(Clone, Copy)]
+        struct CustomColorDraft {
+            rgb: [u8; 3],
+            dragging: bool,
+            dirty_since: f64,
+        }
+
         let Some(pkg) = self.records.get(id).and_then(|r| r.package.as_ref()).cloned() else {
             return;
         };
@@ -2351,10 +2358,14 @@ impl LocalPlugins {
             return;
         };
 
+        let draft_id = egui::Id::new(("lyrics-style-custom-draft", id));
+        let mut color_draft = ui.data(|d| d.get_temp::<CustomColorDraft>(draft_id));
         let mut island_on = current.island;
         let mut expanded_on = current.expanded;
         let mut selected_color = current.color;
-        let mut custom_rgb = current.custom_color;
+        let mut custom_rgb = color_draft.map_or(current.custom_color, |d| d.rgb);
+        let mut hex_lost_focus = false;
+        let mut picked_click = false;
 
         let available_colors: Vec<LyricColor> = entry
             .color_setting
@@ -2373,30 +2384,39 @@ impl LocalPlugins {
 
         let ctx = ui.ctx().clone();
         let dark = ui.visuals().dark_mode;
+        let accent = plugin_accent(ui);
         let primary_text = color(&ctx, Color32::WHITE, Color32::from_rgb(30, 34, 41));
         let secondary_text = color(&ctx, Color32::from_gray(180), Color32::from_gray(92));
 
         settings_card(ui, |ui| {
             let mut has_prev = false;
             if entry.island_setting.is_some() {
-                crate::extras::setting_row(
+                if plugin_setting_switch_row(
                     ui,
+                    &format!("{id}:lyrics-island"),
                     "岛上歌词逐字变色",
                     "收起态岛上单行歌词按演唱进度推进变色，未唱保持白色",
-                    &mut island_on,
-                );
+                    island_on,
+                    false,
+                ) {
+                    island_on = !island_on;
+                }
                 has_prev = true;
             }
             if entry.expanded_setting.is_some() {
                 if has_prev {
                     ui.separator();
                 }
-                crate::extras::setting_row(
+                if plugin_setting_switch_row(
                     ui,
+                    &format!("{id}:lyrics-expanded"),
                     "展开歌词逐字变色",
                     "音乐页右侧滚动歌词的当前句同步逐字变色",
-                    &mut expanded_on,
-                );
+                    expanded_on,
+                    false,
+                ) {
+                    expanded_on = !expanded_on;
+                }
                 has_prev = true;
             }
 
@@ -2438,14 +2458,14 @@ impl LocalPlugins {
                             }
                             let hovered = resp.hovered();
                             let fill = if is_selected {
-                                color(&ctx, Color32::from_rgb(52, 62, 78), Color32::from_rgb(235, 244, 255))
+                                accent.gamma_multiply(if dark { 0.24 } else { 0.11 })
                             } else if hovered {
                                 color(&ctx, Color32::from_rgb(54, 54, 60), Color32::from_rgb(236, 239, 245))
                             } else {
                                 color(&ctx, Color32::from_rgb(44, 44, 49), Color32::from_rgb(245, 247, 250))
                             };
                             let stroke_col = if is_selected {
-                                color(&ctx, Color32::from_rgb(96, 165, 250), Color32::from_rgb(45, 122, 240))
+                                accent
                             } else {
                                 color(&ctx, Color32::from_gray(66), Color32::from_rgb(225, 229, 236))
                             };
@@ -2520,7 +2540,7 @@ impl LocalPlugins {
                             }
 
                             let text_col = if is_selected {
-                                color(&ctx, Color32::WHITE, Color32::from_rgb(24, 88, 198))
+                                color(&ctx, Color32::WHITE, accent)
                             } else {
                                 primary_text
                             };
@@ -2538,6 +2558,8 @@ impl LocalPlugins {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("自定义颜色").size(12.5).color(primary_text));
+                            let pointer_down = ui.input(|i| i.pointer.primary_down());
+                            let now = ui.input(|i| i.time);
                             let mut picker_rgb = custom_rgb;
                             let picked = ui.color_edit_button_srgb(&mut picker_rgb).changed();
                             let hex_id = egui::Id::new(("lyrics-style-custom-hex", id));
@@ -2547,6 +2569,14 @@ impl LocalPlugins {
                             if picked {
                                 custom_rgb = picker_rgb;
                                 hex_draft = format_hex_rgb(custom_rgb);
+                                color_draft = Some(CustomColorDraft {
+                                    rgb: custom_rgb,
+                                    dragging: pointer_down,
+                                    dirty_since: now,
+                                });
+                                if !pointer_down {
+                                    picked_click = true;
+                                }
                             }
                             let edit = ui.add_sized(
                                 [88.0, 26.0],
@@ -2557,7 +2587,15 @@ impl LocalPlugins {
                             if edit.changed() {
                                 if let Some(rgb) = parse_hex_rgb(&hex_draft) {
                                     custom_rgb = rgb;
+                                    color_draft = Some(CustomColorDraft {
+                                        rgb,
+                                        dragging: false,
+                                        dirty_since: now,
+                                    });
                                 }
+                            }
+                            if edit.lost_focus() {
+                                hex_lost_focus = true;
                             }
                             if !edit.has_focus() && parse_hex_rgb(&hex_draft) != Some(custom_rgb) {
                                 hex_draft = format_hex_rgb(custom_rgb);
@@ -2573,7 +2611,7 @@ impl LocalPlugins {
                 });
             }
 
-            // 全宽实时预览胶囊（融入同一卡片底部，无右侧大块空白）
+            // 全宽实时预览胶囊（融入同一卡片底部，仅在可见且未最小化时渲染动画并请求重绘）
             ui.separator();
             let scope_text = match (island_on, expanded_on) {
                 (true, true) => format!("{} · 岛上 + 展开", selected_color.label()),
@@ -2590,103 +2628,131 @@ impl LocalPlugins {
 
             let capsule_w = ui.available_width().max(200.0);
             let (capsule, _) = ui.allocate_exact_size(egui::vec2(capsule_w, 38.0), egui::Sense::hover());
-            let painter = ui.painter();
-            painter.rect_filled(capsule, 19.0, Color32::from_rgb(30, 30, 34));
-            painter.rect_stroke(
-                capsule,
-                19.0,
-                egui::Stroke::new(1.0, Color32::from_white_alpha(20)),
-                egui::StrokeKind::Inside,
-            );
-
-            // 左侧迷你专辑封面示意
-            let art = egui::Rect::from_center_size(
-                egui::pos2(capsule.left() + 21.0, capsule.center().y),
-                egui::vec2(22.0, 22.0),
-            );
-            painter.rect_filled(art, 5.0, Color32::from_rgb(235, 68, 114));
-            painter.circle_filled(egui::pos2(art.center().x - 2.5, art.center().y + 3.0), 2.3, Color32::WHITE);
-            painter.circle_filled(egui::pos2(art.center().x + 3.5, art.center().y + 2.0), 2.3, Color32::WHITE);
-            painter.line_segment(
-                [egui::pos2(art.center().x - 0.5, art.center().y + 2.5), egui::pos2(art.center().x - 0.5, art.center().y - 4.0)],
-                egui::Stroke::new(1.5, Color32::WHITE),
-            );
-            painter.line_segment(
-                [egui::pos2(art.center().x + 5.5, art.center().y + 1.5), egui::pos2(art.center().x + 5.5, art.center().y - 5.0)],
-                egui::Stroke::new(1.5, Color32::WHITE),
-            );
-            painter.line_segment(
-                [egui::pos2(art.center().x - 0.5, art.center().y - 4.0), egui::pos2(art.center().x + 5.5, art.center().y - 5.0)],
-                egui::Stroke::new(1.8, Color32::WHITE),
-            );
-
-            // 右侧迷你律动声波
-            let animate = crate::bar_layout::animations_enabled();
-            let now = ui.input(|i| i.time);
-            let wave_right = capsule.right() - 16.0;
-            for i in 0..5usize {
-                let bx = wave_right - (4 - i) as f32 * 4.2;
-                let h = if any_enabled && animate {
-                    let phase = now as f32 * 4.2 + i as f32 * 0.95;
-                    4.5 + (phase.sin() * 0.5 + 0.5) * 9.0
-                } else {
-                    [5.5, 10.5, 13.0, 8.5, 6.0][i]
-                };
-                let bar_rect = egui::Rect::from_center_size(
-                    egui::pos2(bx, capsule.center().y),
-                    egui::vec2(2.2, h),
+            let capsule_visible =
+                ui.is_rect_visible(capsule) && !ui.input(|i| i.viewport().minimized == Some(true));
+            if capsule_visible {
+                let painter = ui.painter();
+                painter.rect_filled(capsule, 19.0, Color32::from_rgb(30, 30, 34));
+                painter.rect_stroke(
+                    capsule,
+                    19.0,
+                    egui::Stroke::new(1.0, Color32::from_white_alpha(20)),
+                    egui::StrokeKind::Inside,
                 );
-                painter.rect_filled(bar_rect, 1.1, Color32::from_white_alpha(205));
-            }
 
-            // 中间实时卡拉 OK 歌词预览
-            const SAMPLE: &str = "你一句轻描淡写就能让我彻夜难平";
-            let galley = ui.fonts(|f| {
-                f.layout_no_wrap(SAMPLE.into(), theme::font(13.0, W::Semibold), Color32::WHITE)
-            });
-            let text_pos = egui::pos2(
-                capsule.center().x - galley.size().x * 0.5,
-                capsule.center().y - galley.size().y * 0.5,
-            );
-            let inner_clip = egui::Rect::from_min_max(
-                egui::pos2(art.right() + 10.0, capsule.top()),
-                egui::pos2(wave_right - 24.0, capsule.bottom()),
-            );
-            let text_painter = painter.with_clip_rect(inner_clip);
-            if any_enabled {
-                let total_chars = SAMPLE.chars().count() as f32;
-                let done_chars = if animate {
-                    let cycle = (now % 3.6) as f32 / 3.6;
-                    let sweep = ((cycle - 0.08) / 0.80).clamp(0.0, 1.0);
-                    sweep * total_chars
-                } else {
-                    total_chars * 0.65
-                };
-                let phase = if animate { (now as f32 * 0.14).rem_euclid(1.0) } else { 0.0 };
-                paint::karaoke_galley(
-                    &text_painter,
-                    text_pos,
-                    galley,
-                    Color32::WHITE,
-                    selected_color,
-                    custom_rgb,
-                    done_chars,
-                    None,
-                    phase,
+                // 左侧迷你专辑封面示意
+                let art = egui::Rect::from_center_size(
+                    egui::pos2(capsule.left() + 21.0, capsule.center().y),
+                    egui::vec2(22.0, 22.0),
                 );
-                if animate {
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                painter.rect_filled(art, 5.0, Color32::from_rgb(235, 68, 114));
+                painter.circle_filled(egui::pos2(art.center().x - 2.5, art.center().y + 3.0), 2.3, Color32::WHITE);
+                painter.circle_filled(egui::pos2(art.center().x + 3.5, art.center().y + 2.0), 2.3, Color32::WHITE);
+                painter.line_segment(
+                    [egui::pos2(art.center().x - 0.5, art.center().y + 2.5), egui::pos2(art.center().x - 0.5, art.center().y - 4.0)],
+                    egui::Stroke::new(1.5, Color32::WHITE),
+                );
+                painter.line_segment(
+                    [egui::pos2(art.center().x + 5.5, art.center().y + 1.5), egui::pos2(art.center().x + 5.5, art.center().y - 5.0)],
+                    egui::Stroke::new(1.5, Color32::WHITE),
+                );
+                painter.line_segment(
+                    [egui::pos2(art.center().x - 0.5, art.center().y - 4.0), egui::pos2(art.center().x + 5.5, art.center().y - 5.0)],
+                    egui::Stroke::new(1.8, Color32::WHITE),
+                );
+
+                // 右侧迷你律动声波
+                let animate = crate::bar_layout::animations_enabled();
+                let now = ui.input(|i| i.time);
+                let wave_right = capsule.right() - 16.0;
+                for i in 0..5usize {
+                    let bx = wave_right - (4 - i) as f32 * 4.2;
+                    let h = if any_enabled && animate {
+                        let phase = now as f32 * 4.2 + i as f32 * 0.95;
+                        4.5 + (phase.sin() * 0.5 + 0.5) * 9.0
+                    } else {
+                        [5.5, 10.5, 13.0, 8.5, 6.0][i]
+                    };
+                    let bar_rect = egui::Rect::from_center_size(
+                        egui::pos2(bx, capsule.center().y),
+                        egui::vec2(2.2, h),
+                    );
+                    painter.rect_filled(bar_rect, 1.1, Color32::from_white_alpha(205));
                 }
-            } else {
-                text_painter.galley(text_pos, galley, Color32::WHITE);
+
+                // 中间实时卡拉 OK 歌词预览
+                const SAMPLE: &str = "你一句轻描淡写就能让我彻夜难平";
+                let galley = ui.fonts(|f| {
+                    f.layout_no_wrap(SAMPLE.into(), theme::font(13.0, W::Semibold), Color32::WHITE)
+                });
+                let text_pos = egui::pos2(
+                    capsule.center().x - galley.size().x * 0.5,
+                    capsule.center().y - galley.size().y * 0.5,
+                );
+                let inner_clip = egui::Rect::from_min_max(
+                    egui::pos2(art.right() + 10.0, capsule.top()),
+                    egui::pos2(wave_right - 24.0, capsule.bottom()),
+                );
+                let text_painter = painter.with_clip_rect(inner_clip);
+                if any_enabled {
+                    let total_chars = SAMPLE.chars().count() as f32;
+                    let done_chars = if animate {
+                        let cycle = (now % 3.6) as f32 / 3.6;
+                        let sweep = ((cycle - 0.08) / 0.80).clamp(0.0, 1.0);
+                        sweep * total_chars
+                    } else {
+                        total_chars * 0.65
+                    };
+                    let phase = if animate { (now as f32 * 0.14).rem_euclid(1.0) } else { 0.0 };
+                    paint::karaoke_galley(
+                        &text_painter,
+                        text_pos,
+                        galley,
+                        Color32::WHITE,
+                        selected_color,
+                        custom_rgb,
+                        done_chars,
+                        None,
+                        phase,
+                    );
+                    if animate {
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                    }
+                } else {
+                    text_painter.galley(text_pos, galley, Color32::WHITE);
+                }
             }
         });
 
-        let changed = island_on != current.island
+        let immediate_changed = island_on != current.island
             || expanded_on != current.expanded
-            || selected_color != current.color
-            || custom_rgb != current.custom_color;
-        if changed {
+            || selected_color != current.color;
+        let pointer_down = ui.input(|i| i.pointer.primary_down());
+        let now = ui.input(|i| i.time);
+        let mut commit_custom = false;
+        if let Some(draft) = color_draft {
+            if draft.rgb == current.custom_color {
+                color_draft = None;
+            } else if immediate_changed
+                || hex_lost_focus
+                || picked_click
+                || (!pointer_down && (draft.dragging || now - draft.dirty_since >= 0.25))
+            {
+                commit_custom = true;
+                color_draft = None;
+            } else if !draft.dragging {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+            }
+        }
+        ui.data_mut(|d| {
+            if let Some(draft) = color_draft {
+                d.insert_temp(draft_id, draft);
+            } else {
+                d.remove::<CustomColorDraft>(draft_id);
+            }
+        });
+
+        if immediate_changed || commit_custom {
             let mut next = pkg.settings_values(&self.records[id].values);
             if let Some(key) = entry.island_setting.as_deref() {
                 next.insert(key.to_owned(), if island_on { "true" } else { "false" }.to_owned());

@@ -1413,6 +1413,7 @@ fn lyrics_style_is_code_free_scoped_and_follows_activation() -> Result<()> {
         r#"{"version":1,"unknown":true}"#,
         r#"{"version":1,"defaultColor":"invalid"}"#,
         r#"{"version":1,"colorSetting":"not-declared"}"#,
+        r#"{"version":1,"islandSetting":"island_enabled","expandedSetting":"island_enabled"}"#,
         r#"{"version":2}"#,
     ] {
         fs::write(&entry, raw)?;
@@ -1431,6 +1432,84 @@ fn lyrics_style_is_code_free_scoped_and_follows_activation() -> Result<()> {
     assert_eq!(host.active_lyrics_style().unwrap().0, "example.lyrics-second");
     host.uninstall("example.lyrics-second", false)?;
     assert!(host.active_lyrics_style().is_none());
+
+    // v1.0.0（enabled/expanded + 2 项 choice color）→ v1.0.1（island_enabled/expanded_enabled + text color）
+    // 本地重载与集市升级均应迁移用户已关闭的开关与合法颜色偏好。
+    let mig_dir = root.join("example.lyrics-migrate");
+    fs::create_dir(&mig_dir)?;
+    fs::write(mig_dir.join(COVER_FILE), include_bytes!("examples/payday/cover.png"))?;
+    let mig_manifest = mig_dir.join("plugin.json");
+    let mig_entry = mig_dir.join("lyrics-style.json");
+    fs::write(
+        &mig_entry,
+        r##"{"version":1,"karaoke":true,"expanded":true,"defaultColor":"rainbow","defaultCustomColor":"#38BDF8","enabledSetting":"enabled","expandedSetting":"expanded","colorSetting":"color","customColorSetting":"custom_color"}"##,
+    )?;
+    fs::write(
+        &mig_manifest,
+        json!({
+            "id": "example.lyrics-migrate", "name": "逐字变色歌词", "author": "swidan123", "version": "1.0.0",
+            "api": 1, "runtime": "assets", "entry": "lyrics-style.json", "cover": COVER_FILE,
+            "owner": "music", "capabilities": ["lyrics.style", "settings"], "dataVersion": 1,
+            "permissions": {}, "settings": [
+                {"key": "enabled", "label": "歌词逐字变色", "type": "switch", "default": "true"},
+                {"key": "expanded", "label": "展开歌词同步变色", "type": "switch", "default": "true"},
+                {"key": "color", "label": "已唱颜色", "type": "choice", "default": "rainbow", "choices": [
+                    {"value": "rainbow", "label": "彩虹流光"},
+                    {"value": "custom", "label": "自定义色号"}
+                ]},
+                {"key": "custom_color", "label": "自定义色号", "type": "text", "default": "#38BDF8"}
+            ]
+        })
+        .to_string(),
+    )?;
+    host.install(&mig_manifest)?;
+    host.enable("example.lyrics-migrate", true)?;
+    host.save(
+        "example.lyrics-migrate",
+        Values::from([
+            ("enabled".into(), "false".into()),
+            ("expanded".into(), "false".into()),
+            ("color".into(), "custom".into()),
+            ("custom_color".into(), "#007F00".into()),
+        ]),
+    )?;
+    let v100_record = host.records["example.lyrics-migrate"].clone();
+    // 原地更新为 v1.0.1 清单并测试本地热重载迁移。
+    fs::write(
+        &mig_entry,
+        r##"{"version":1,"island":true,"expanded":true,"defaultColor":"rainbow","defaultCustomColor":"#38BDF8","islandSetting":"island_enabled","expandedSetting":"expanded_enabled","colorSetting":"color","customColorSetting":"custom_color"}"##,
+    )?;
+    fs::write(
+        &mig_manifest,
+        json!({
+            "id": "example.lyrics-migrate", "name": "逐字变色歌词", "author": "swidan123", "version": "1.0.1",
+            "api": 1, "runtime": "assets", "entry": "lyrics-style.json", "cover": COVER_FILE,
+            "owner": "music", "capabilities": ["lyrics.style", "settings"], "dataVersion": 1,
+            "permissions": {}, "settings": [
+                {"key": "island_enabled", "label": "岛上歌词逐字变色", "type": "switch", "default": "true"},
+                {"key": "expanded_enabled", "label": "展开歌词逐字变色", "type": "switch", "default": "true"},
+                {"key": "color", "label": "已唱颜色", "type": "text", "default": "rainbow"},
+                {"key": "custom_color", "label": "自定义色号", "type": "text", "default": "#38BDF8"}
+            ]
+        })
+        .to_string(),
+    )?;
+    let v101_pkg = Package::read(&mig_manifest)?;
+    host.reload_local("example.lyrics-migrate")?;
+    let reloaded = host.active_lyrics_style().unwrap().1;
+    assert!(!reloaded.island && !reloaded.expanded);
+    assert_eq!(reloaded.color, crate::model::LyricColor::Custom);
+    assert_eq!(reloaded.custom_color, [0, 127, 0]);
+    #[cfg(windows)]
+    {
+        let upgraded = market_state::prepare_record(v100_record, v101_pkg)?;
+        assert_eq!(upgraded.values.get("island_enabled").map(String::as_str), Some("false"));
+        assert_eq!(upgraded.values.get("expanded_enabled").map(String::as_str), Some("false"));
+        assert_eq!(upgraded.values.get("color").map(String::as_str), Some("custom"));
+        assert_eq!(upgraded.values.get("custom_color").map(String::as_str), Some("#007F00"));
+    }
+    #[cfg(not(windows))]
+    let _ = (v100_record, v101_pkg);
     fs::remove_dir_all(root)?;
     Ok(())
 }

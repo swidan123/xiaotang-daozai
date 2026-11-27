@@ -24,6 +24,7 @@ jobs:
           cargo +stable test --locked --lib --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc island_lyrics -- --test-threads=1
           cargo +stable test --locked --lib --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc expanded_and_segmented_lyrics -- --test-threads=1
           cargo +stable test --locked --lib --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc lyric_short_gap -- --test-threads=1
+          cargo +stable test --locked --lib --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc island_lyric_pagination -- --test-threads=1
       - name: Build release daozai.exe (v0.6.71 + lyrics.style)
         run: |
           $env:CARGO_ENCODED_RUSTFLAGS = "-C$([char]0x1f)target-feature=+crt-static"

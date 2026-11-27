@@ -2202,21 +2202,9 @@ impl App {
             let lyrics=self.ly.lyrics.as_ref().unwrap();
             let (line_done,total_chars)=lyrics.line_char_progress(index,self.lyric_position(),self.media.duration as f32);
             if galley.rows.len()>1 {
-                // 按当前句的时间范围与各段字数切换，暂停和跳转直接跟随播放位置。
-                let line_progress=if total_chars>0 {(line_done/total_chars as f32).clamp(0.0,1.0)}else{0.0};
-                let total:usize=galley.rows.iter().map(|row|row.glyphs.len()).sum();
-                let mut count=0usize;
-                let mut seg_start=0usize;
-                let page=galley.rows.iter().position(|row|{
-                    seg_start=count;
-                    count+=row.glyphs.len();
-                    line_progress*(total as f32)<count as f32
-                }).unwrap_or_else(||{
-                    let last=galley.rows.len()-1;
-                    let last_len=galley.rows[last].glyphs.len();
-                    seg_start=total.saturating_sub(last_len);
-                    last
-                });
+                // 按当前句的逻辑字进度与各段映射范围切换，避免 RTL 合字/连写行提前翻页。
+                let row_lens:Vec<usize>=galley.rows.iter().map(|row|row.glyphs.len()).collect();
+                let (page,seg_start)=select_island_lyric_page(&row_lens,line_done,total_chars,visual_map.as_deref());
                 let raw_segment=galley.rows[page].glyphs.iter().map(|glyph|glyph.chr).collect::<String>();
                 let trimmed=raw_segment.trim();
                 let start_byte=trimmed.as_ptr() as usize - raw_segment.as_ptr() as usize;
@@ -4770,5 +4758,104 @@ impl App {
             self.cancel_edit();
             if added {self.open_task_reminder(0);}
         }
+    }
+}
+
+/// 根据当前句的逻辑字进度选择岛上应显示的分页行号及该行在 `visual_map` 中的起始偏移。
+/// 存在 `visual_map` 时直接按各行覆盖的原始逻辑字符范围（含折行处空格）选页，避免 RTL 合字行提前翻页。
+pub(crate) fn select_island_lyric_page(
+    row_lens: &[usize],
+    line_done: f32,
+    total_chars: usize,
+    visual_map: Option<&[crate::rtl_text::VisualChar]>,
+) -> (usize, usize) {
+    if row_lens.len() <= 1 {
+        return (0, 0);
+    }
+    if let Some(map) = visual_map {
+        let mut ranges: Vec<(usize, Option<(usize, usize)>)> = Vec::with_capacity(row_lens.len());
+        let mut cursor = 0usize;
+        for &len in row_lens {
+            let start = cursor.min(map.len());
+            let end = (cursor + len).min(map.len());
+            let bounds = if start < end {
+                let mut lo = usize::MAX;
+                let mut hi = 0usize;
+                for vc in &map[start..end] {
+                    lo = lo.min(vc.logical_start);
+                    hi = hi.max(vc.logical_start + vc.logical_len);
+                }
+                Some((lo, hi))
+            } else {
+                None
+            };
+            ranges.push((cursor, bounds));
+            cursor += len;
+        }
+        for i in 0..ranges.len() {
+            let (seg_start, bounds) = ranges[i];
+            let Some((_, row_end)) = bounds else {
+                continue;
+            };
+            let next_start = ranges[i + 1..]
+                .iter()
+                .find_map(|(_, b)| b.map(|(lo, _)| lo));
+            let limit = next_start.map_or(row_end, |ns| ns.max(row_end));
+            if line_done < limit as f32 {
+                return (i, seg_start);
+            }
+        }
+        let last = row_lens.len() - 1;
+        return (last, ranges[last].0);
+    }
+    let line_progress = if total_chars > 0 {
+        (line_done / total_chars as f32).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let total: usize = row_lens.iter().sum();
+    let mut count = 0usize;
+    let mut seg_start = 0usize;
+    let page = row_lens
+        .iter()
+        .position(|&len| {
+            seg_start = count;
+            count += len;
+            line_progress * (total as f32) < count as f32
+        })
+        .unwrap_or_else(|| {
+            let last = row_lens.len() - 1;
+            seg_start = total.saturating_sub(row_lens[last]);
+            last
+        });
+    (page, seg_start)
+}
+
+#[cfg(test)]
+mod island_lyric_pagination_tests {
+    use super::select_island_lyric_page;
+
+    #[test]
+    fn rtl_ligature_island_pagination_uses_logical_bounds() {
+        // 8 个 "لا"（23 逻辑字符，合字后 15 视觉字符）+ 空格 + 18 个 "春"（总 42 逻辑字符，33 视觉字符）。
+        let seg1 = vec!["لا"; 8].join(" ");
+        let seg2 = "春".repeat(18);
+        let text = format!("{seg1} {seg2}");
+        assert_eq!(text.chars().count(), 42);
+        // 模拟每视觉字符 10pt，max_width = 200pt，使第一段（15 视觉字符）与第二段（18 视觉字符）分成两行。
+        let (wrapped, map) = crate::rtl_text::display_wrapped_with_map(&text, 200.0, |s| {
+            s.chars().count() as f32 * 10.0
+        });
+        let lines: Vec<&str> = wrapped.split('\n').collect();
+        assert_eq!(lines.len(), 2);
+        let row_lens: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
+        assert_eq!(row_lens, vec![15, 18]);
+        let map = map.expect("含 RTL 字符应返回 visual_map");
+        // done = 21 时第一行仍剩 2 个逻辑字符，绝不能提前切到第二行。
+        assert_eq!(select_island_lyric_page(&row_lens, 21.0, 42, Some(&map)), (0, 0));
+        // 唱到折行空格（23.5）时仍停留在已唱满的第一行。
+        assert_eq!(select_island_lyric_page(&row_lens, 23.5, 42, Some(&map)), (0, 0));
+        // 第二行首字起点（24.0）准时翻页到第二行。
+        assert_eq!(select_island_lyric_page(&row_lens, 24.0, 42, Some(&map)), (1, 15));
     }
 }

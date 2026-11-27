@@ -184,7 +184,7 @@ impl LocalPlugins {
         }
     }
 
-    fn reload_local(&mut self, id: &str) -> Result<()> {
+    pub(super) fn reload_local(&mut self, id: &str) -> Result<()> {
         let mut record = self.installed(id)?;
         let previous = &record.package.as_ref().unwrap().manifest;
         let package = Package::read(&record.origin)?;
@@ -196,8 +196,13 @@ impl LocalPlugins {
         if previous.source_kind() != package.manifest.source_kind() {
             record.source_grant = None;
         }
-        record.values = package.settings_values(&record.values);
+        record.values = record
+            .package
+            .as_ref()
+            .and_then(|old_pkg| old_pkg.migrate_lyrics_style_values(&package, &record.values))
+            .unwrap_or_else(|| package.settings_values(&record.values));
         record.package = Some(package);
+        self.drafts.remove(id);
         #[cfg(windows)]
         let previous_secret = {
             let scope_changed = match (previous_network.as_ref(), record.network()) {
