@@ -1347,7 +1347,7 @@ fn lyrics_style_is_code_free_scoped_and_follows_activation() -> Result<()> {
         fs::write(dir.join(COVER_FILE), include_bytes!("examples/payday/cover.png"))?;
         fs::write(
             dir.join("lyrics-style.json"),
-            r#"{"version":1,"karaoke":true,"defaultColor":"rainbow","defaultCustomColor":"#38BDF8","expanded":true,"enabledSetting":"enabled","colorSetting":"color","customColorSetting":"custom_color","expandedSetting":"expanded"}"#,
+            r##"{"version":1,"karaoke":true,"defaultColor":"rainbow","defaultCustomColor":"#38BDF8","expanded":true,"enabledSetting":"enabled","colorSetting":"color","customColorSetting":"custom_color","expandedSetting":"expanded"}"##,
         )?;
         let path = dir.join("plugin.json");
         fs::write(
