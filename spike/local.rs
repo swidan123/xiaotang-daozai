@@ -1380,6 +1380,7 @@ pub struct LocalPlugins {
     pending: Option<String>,
     focus: Option<String>,
     drafts: BTreeMap<String, Values>,
+    view_epoch: u64,
     card_index: usize,
     #[cfg(feature = "sdk-material")]
     selected_material: Option<String>,
@@ -1424,6 +1425,7 @@ impl LocalPlugins {
             pending: None,
             focus: None,
             drafts: BTreeMap::new(),
+            view_epoch: 0,
             card_index: 0,
         };
         let read = (|| -> Result<()> {
@@ -1687,6 +1689,7 @@ impl LocalPlugins {
         self.source_fetch.remove(id);
         self.errors.remove(id);
         self.drafts.remove(id);
+        self.view_epoch = self.view_epoch.wrapping_add(1);
     }
     pub(crate) fn install(&mut self, path: &Path) -> Result<()> {
         let path = path.canonicalize()?;

@@ -196,11 +196,18 @@ impl LocalPlugins {
         if previous.source_kind() != package.manifest.source_kind() {
             record.source_grant = None;
         }
-        record.values = record
+        record.values = if record
             .package
             .as_ref()
-            .and_then(|old_pkg| old_pkg.migrate_lyrics_style_values(&package, &record.values))
-            .unwrap_or_else(|| package.settings_values(&record.values));
+            .is_some_and(|old_pkg| old_pkg.manifest.is_lyrics_style() && package.manifest.is_lyrics_style())
+        {
+            let old_pkg = record.package.as_ref().unwrap();
+            old_pkg
+                .migrate_lyrics_style_values(&package, &record.values)
+                .ok_or_else(|| fail("新版本的歌词样式设置与已保存配置不兼容，已保留当前版本"))?
+        } else {
+            package.settings_values(&record.values)
+        };
         record.package = Some(package);
         self.drafts.remove(id);
         #[cfg(windows)]

@@ -2338,9 +2338,12 @@ impl LocalPlugins {
 
     fn lyrics_style_settings_card(&mut self, ui: &mut egui::Ui, id: &str) {
         use crate::model::{format_hex_rgb, parse_hex_rgb, LyricColor};
+        use std::hash::{Hash, Hasher};
 
         #[derive(Clone, Copy)]
         struct CustomColorDraft {
+            pkg_fingerprint: u64,
+            base_rgb: [u8; 3],
             rgb: [u8; 3],
             dragging: bool,
             dirty_since: f64,
@@ -2358,8 +2361,30 @@ impl LocalPlugins {
             return;
         };
 
+        let pkg_fingerprint = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.view_epoch.hash(&mut hasher);
+            pkg.manifest.version.hash(&mut hasher);
+            pkg.source.hash(&mut hasher);
+            hasher.finish()
+        };
+        let saved_stamp = (pkg_fingerprint, current.custom_color);
         let draft_id = egui::Id::new(("lyrics-style-custom-draft", id));
+        let hex_id = egui::Id::new(("lyrics-style-custom-hex", id));
+        let stamp_id = egui::Id::new(("lyrics-style-saved-stamp", id));
+        let prev_stamp = ui.data(|d| d.get_temp::<(u64, [u8; 3])>(stamp_id));
         let mut color_draft = ui.data(|d| d.get_temp::<CustomColorDraft>(draft_id));
+        if prev_stamp != Some(saved_stamp)
+            || color_draft
+                .is_some_and(|d| d.pkg_fingerprint != pkg_fingerprint || d.base_rgb != current.custom_color)
+        {
+            color_draft = None;
+            ui.data_mut(|d| {
+                d.remove::<CustomColorDraft>(draft_id);
+                d.remove::<String>(hex_id);
+                d.insert_temp(stamp_id, saved_stamp);
+            });
+        }
         let mut island_on = current.island;
         let mut expanded_on = current.expanded;
         let mut selected_color = current.color;
@@ -2562,7 +2587,6 @@ impl LocalPlugins {
                             let now = ui.input(|i| i.time);
                             let mut picker_rgb = custom_rgb;
                             let picked = ui.color_edit_button_srgb(&mut picker_rgb).changed();
-                            let hex_id = egui::Id::new(("lyrics-style-custom-hex", id));
                             let mut hex_draft = ui
                                 .data(|d| d.get_temp::<String>(hex_id))
                                 .unwrap_or_else(|| format_hex_rgb(custom_rgb));
@@ -2570,6 +2594,8 @@ impl LocalPlugins {
                                 custom_rgb = picker_rgb;
                                 hex_draft = format_hex_rgb(custom_rgb);
                                 color_draft = Some(CustomColorDraft {
+                                    pkg_fingerprint,
+                                    base_rgb: current.custom_color,
                                     rgb: custom_rgb,
                                     dragging: pointer_down,
                                     dirty_since: now,
@@ -2588,6 +2614,8 @@ impl LocalPlugins {
                                 if let Some(rgb) = parse_hex_rgb(&hex_draft) {
                                     custom_rgb = rgb;
                                     color_draft = Some(CustomColorDraft {
+                                        pkg_fingerprint,
+                                        base_rgb: current.custom_color,
                                         rgb,
                                         dragging: false,
                                         dirty_since: now,

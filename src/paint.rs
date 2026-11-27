@@ -82,29 +82,27 @@ pub fn karaoke_galley(
         }
         if lo.is_finite() && hi > lo { (lo, hi) } else { (0.0, 1.0) }
     };
+    let has_map = visual_map.is_some();
     let mut row_cursor = 0usize;
     for row in &mut std::sync::Arc::make_mut(&mut colored).rows {
-        let row_rtl = row
+        let glyph_boxes: Vec<(f32, f32, crate::rtl_text::VisualChar)> = row
             .glyphs
             .iter()
             .enumerate()
-            .find_map(|(idx, _)| {
-                let vc = lookup(row_cursor + idx);
-                (vc.logical_start == 0).then_some(vc.rtl)
+            .map(|(idx, glyph)| {
+                let x0 = glyph.pos.x;
+                let x1 = x0 + glyph.advance_width.max(0.0);
+                (x0, x1, lookup(row_cursor + idx))
             })
-            .unwrap_or(false);
+            .collect();
         row_cursor += row.glyphs.len();
         let (min_x, max_x) = if row.visuals.mesh_bounds.is_positive() {
             (row.visuals.mesh_bounds.min.x, row.visuals.mesh_bounds.max.x)
         } else {
             (global_min_x, global_max_x)
         };
-        let width = (max_x - min_x).max(1.0);
         for vertex in &mut row.visuals.mesh.vertices {
-            let mut u = ((vertex.pos.x - min_x) / width).clamp(0.0, 1.0);
-            if row_rtl {
-                u = 1.0 - u;
-            }
+            let u = gradient_u_for_x(vertex.pos.x, &glyph_boxes, min_x, max_x, has_map);
             let col = style.color_at(u, phase, custom_rgb);
             let a = vertex.color.a() as f32 / 255.0;
             vertex.color = if a < 0.999 { col.gamma_multiply(a) } else { col };
@@ -1395,4 +1393,100 @@ pub fn chase(c: &Card, x0: f32, head: f32, y: f32, thick: f32, tint: Color32, ho
         }
     }
     c.painter.add(egui::Shape::mesh(mesh));
+}
+
+/// 计算单行歌词顶点横坐标 `x` 对应的渐变采样坐标 `u`（0..=1）：
+/// - 纯 LTR 行（`!has_map`）直接按行视觉宽度线性映射；
+/// - 含 RTL 或双向混排行按各字形的逻辑字符区间与字形书写方向映射，
+///   支持分页后的第 2+ 行 RTL（`logical_start > 0`）以及单行内 LTR/RTL 混排。
+pub(crate) fn gradient_u_for_x(
+    x: f32,
+    glyph_boxes: &[(f32, f32, crate::rtl_text::VisualChar)],
+    min_x: f32,
+    max_x: f32,
+    has_map: bool,
+) -> f32 {
+    if !has_map || glyph_boxes.is_empty() {
+        return ((x - min_x) / (max_x - min_x).max(1.0)).clamp(0.0, 1.0);
+    }
+    let mut row_lo = usize::MAX;
+    let mut row_hi = 0usize;
+    for &(_, _, vc) in glyph_boxes {
+        row_lo = row_lo.min(vc.logical_start);
+        row_hi = row_hi.max(vc.logical_start + vc.logical_len.max(1));
+    }
+    let span = row_hi.saturating_sub(row_lo).max(1) as f32;
+    let mut best = glyph_boxes[0];
+    let mut best_dist = f32::INFINITY;
+    let mut best_center_dist = f32::INFINITY;
+    for &(x0, x1, vc) in glyph_boxes {
+        let dist = if x < x0 {
+            x0 - x
+        } else if x > x1 {
+            x - x1
+        } else {
+            0.0
+        };
+        let center_dist = (x - (x0 + x1) * 0.5).abs();
+        if dist < best_dist - 1e-4
+            || ((dist - best_dist).abs() <= 1e-4 && center_dist < best_center_dist)
+        {
+            best = (x0, x1, vc);
+            best_dist = dist;
+            best_center_dist = center_dist;
+        }
+    }
+    let (x0, x1, vc) = best;
+    let mut local = if x1 - x0 > 1e-3 {
+        ((x - x0) / (x1 - x0)).clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    if vc.rtl {
+        local = 1.0 - local;
+    }
+    let logical_pos = vc.logical_start as f32 + local * vc.logical_len.max(1) as f32;
+    ((logical_pos - row_lo as f32) / span).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod karaoke_gradient_direction_tests {
+    use super::gradient_u_for_x;
+    use crate::rtl_text::VisualChar;
+
+    #[test]
+    fn second_rtl_row_sweeps_gradient_right_to_left() {
+        // 模拟分页后的第 2 行 RTL（全局 logical_start 从 24 起，共 4 个视觉字形，从左到右对应逻辑 27, 26, 25, 24）。
+        let boxes = vec![
+            (0.0, 10.0, VisualChar { logical_start: 27, logical_len: 1, rtl: true }),
+            (10.0, 20.0, VisualChar { logical_start: 26, logical_len: 1, rtl: true }),
+            (20.0, 30.0, VisualChar { logical_start: 25, logical_len: 1, rtl: true }),
+            (30.0, 40.0, VisualChar { logical_start: 24, logical_len: 1, rtl: true }),
+        ];
+        let u_right = gradient_u_for_x(40.0, &boxes, 0.0, 40.0, true);
+        let u_mid = gradient_u_for_x(20.0, &boxes, 0.0, 40.0, true);
+        let u_left = gradient_u_for_x(0.0, &boxes, 0.0, 40.0, true);
+        assert!(u_right < 0.01, "RTL 第 2 行最右侧应为渐变起点，实际 {u_right}");
+        assert!((u_mid - 0.5).abs() < 0.05, "中点应约 0.5，实际 {u_mid}");
+        assert!(u_left > 0.99, "RTL 第 2 行最左侧应为渐变终点，实际 {u_left}");
+    }
+
+    #[test]
+    fn mixed_bidi_row_follows_each_run_direction() {
+        // 逻辑 "AB مرح"：左侧 LTR "AB"(0,1)，中间空格(2)，右侧 RTL "مرح" 视觉为 ح(5) ر(4) م(3)。
+        let boxes = vec![
+            (0.0, 10.0, VisualChar { logical_start: 0, logical_len: 1, rtl: false }),
+            (10.0, 20.0, VisualChar { logical_start: 1, logical_len: 1, rtl: false }),
+            (20.0, 30.0, VisualChar { logical_start: 2, logical_len: 1, rtl: false }),
+            (30.0, 40.0, VisualChar { logical_start: 5, logical_len: 1, rtl: true }),
+            (40.0, 50.0, VisualChar { logical_start: 4, logical_len: 1, rtl: true }),
+            (50.0, 60.0, VisualChar { logical_start: 3, logical_len: 1, rtl: true }),
+        ];
+        // LTR 段左→右递增
+        assert!(gradient_u_for_x(5.0, &boxes, 0.0, 60.0, true) < gradient_u_for_x(15.0, &boxes, 0.0, 60.0, true));
+        // RTL 段右→左递增（右侧逻辑 3 小于左侧逻辑 5）
+        let u_rtl_first = gradient_u_for_x(55.0, &boxes, 0.0, 60.0, true);
+        let u_rtl_last = gradient_u_for_x(35.0, &boxes, 0.0, 60.0, true);
+        assert!(u_rtl_first < u_rtl_last, "混排行中 RTL 词应从右向左推进渐变：{u_rtl_first} vs {u_rtl_last}");
+    }
 }

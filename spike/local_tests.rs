@@ -1494,12 +1494,41 @@ fn lyrics_style_is_code_free_scoped_and_follows_activation() -> Result<()> {
         })
         .to_string(),
     )?;
+    let epoch_before_reload = host.view_epoch;
     let v101_pkg = Package::read(&mig_manifest)?;
     host.reload_local("example.lyrics-migrate")?;
+    assert!(host.view_epoch > epoch_before_reload, "热重载应递增视图代际以作废临时草稿");
     let reloaded = host.active_lyrics_style().unwrap().1;
     assert!(!reloaded.island && !reloaded.expanded);
     assert_eq!(reloaded.color, crate::model::LyricColor::Custom);
     assert_eq!(reloaded.custom_color, [0, 127, 0]);
+    // 不兼容的本地热重载（如删掉 custom_color 或 choice 不包含当前已保存的 custom）必须被拒绝，不能静默重置设置。
+    fs::write(
+        &mig_entry,
+        r##"{"version":1,"island":true,"expanded":true,"defaultColor":"rainbow","defaultCustomColor":"#38BDF8","islandSetting":"island_enabled","expandedSetting":"expanded_enabled","colorSetting":"color"}"##,
+    )?;
+    fs::write(
+        &mig_manifest,
+        json!({
+            "id": "example.lyrics-migrate", "name": "逐字变色歌词", "author": "swidan123", "version": "1.0.2",
+            "api": 1, "runtime": "assets", "entry": "lyrics-style.json", "cover": COVER_FILE,
+            "owner": "music", "capabilities": ["lyrics.style", "settings"], "dataVersion": 1,
+            "permissions": {}, "settings": [
+                {"key": "island_enabled", "label": "岛上歌词逐字变色", "type": "switch", "default": "true"},
+                {"key": "expanded_enabled", "label": "展开歌词逐字变色", "type": "switch", "default": "true"},
+                {"key": "color", "label": "已唱颜色", "type": "choice", "default": "rainbow", "choices": [
+                    {"value": "rainbow", "label": "彩虹流光"},
+                    {"value": "aurora", "label": "极光渐变"}
+                ]}
+            ]
+        })
+        .to_string(),
+    )?;
+    assert!(host.reload_local("example.lyrics-migrate").is_err(), "不兼容的歌词样式热重载不应静默重置设置");
+    let still_preserved = host.active_lyrics_style().unwrap().1;
+    assert!(!still_preserved.island && !still_preserved.expanded);
+    assert_eq!(still_preserved.color, crate::model::LyricColor::Custom);
+    assert_eq!(still_preserved.custom_color, [0, 127, 0]);
     #[cfg(windows)]
     {
         let upgraded = market_state::prepare_record(v100_record, v101_pkg)?;
