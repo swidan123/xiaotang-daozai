@@ -1,0 +1,35 @@
+name: Build Karaoke Lyrics Preview
+on:
+  push:
+    branches: [feat/karaoke-lyrics]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
+      - name: Run lyrics & music UI tests
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: |
+          cargo +stable test --locked --lib --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc lyrics:: -- --test-threads=1
+          cargo +stable test --locked --lib --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc karaoke_lyrics -- --test-threads=1
+          cargo +stable test --locked --lib --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc music_lyric -- --test-threads=1
+          cargo +stable test --locked --lib --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc island_lyrics -- --test-threads=1
+          cargo +stable test --locked --lib --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc expanded_and_segmented_lyrics -- --test-threads=1
+          cargo +stable test --locked --lib --features record,sdk-js,sdk-material --target x86_64-pc-windows-msvc lyric_short_gap -- --test-threads=1
+      - name: Build release daozai.exe
+        run: |
+          $env:CARGO_ENCODED_RUSTFLAGS = "-C$([char]0x1f)target-feature=+crt-static"
+          cargo +stable build --locked --release --features sdk-js,sdk-material --bin daozai --target x86_64-pc-windows-msvc
+      - name: Upload daozai.exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daozai-karaoke-win64
+          path: target/x86_64-pc-windows-msvc/release/daozai.exe
+          retention-days: 14
