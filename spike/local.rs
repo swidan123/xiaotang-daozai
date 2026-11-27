@@ -205,6 +205,34 @@ struct MailViewEntry {
     aliases_setting: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LyricsStyleEntry {
+    version: u32,
+    #[serde(default = "default_lyrics_true")]
+    karaoke: bool,
+    #[serde(default = "default_lyric_color_key")]
+    default_color: String,
+    #[serde(default = "default_lyric_custom_hex")]
+    default_custom_color: String,
+    #[serde(default = "default_lyrics_true")]
+    expanded: bool,
+    enabled_setting: Option<String>,
+    color_setting: Option<String>,
+    custom_color_setting: Option<String>,
+    expanded_setting: Option<String>,
+}
+
+fn default_lyrics_true() -> bool {
+    true
+}
+fn default_lyric_color_key() -> String {
+    "rainbow".into()
+}
+fn default_lyric_custom_hex() -> String {
+    "#38BDF8".into()
+}
+
 fn default_refresh() -> u32 {
     60
 }
@@ -319,6 +347,7 @@ impl Record {
                 && (package.canvas_images.is_empty()
                     || manifest.has_capability("status.canvas") && canvas_images::valid_snapshot(&package.canvas_images))
                 && package.validate_mail_view().is_ok()
+                && package.validate_lyrics_style().is_ok()
                 && package.validate_page_shortcut_colors().is_ok()
                 && package.validate_appearance().is_ok()
                 && package.valid_font_assets()
@@ -476,6 +505,10 @@ impl Manifest {
         self.runtime == "assets" && self.has_capability("mail.view")
     }
 
+    fn is_lyrics_style(&self) -> bool {
+        self.runtime == "assets" && self.has_capability("lyrics.style")
+    }
+
     fn is_page_shortcuts(&self) -> bool {
         self.runtime == "assets" && self.capabilities.as_slice() == ["navigation.shortcuts"]
     }
@@ -522,7 +555,7 @@ impl Manifest {
     fn source_limit(&self) -> u64 {
         if self.is_material() {
             MATERIAL_SOURCE_LIMIT
-        } else if self.is_mail_view() {
+        } else if self.is_mail_view() || self.is_lyrics_style() {
             4096
         } else if self.is_page_shortcuts() {
             PAGE_SHORTCUT_SOURCE_LIMIT
@@ -642,6 +675,12 @@ impl Manifest {
                 || !m.permissions.is_empty() || m.material.is_some()
             {
                 return Err(fail("邮箱视图只支持无权限的 mail-view.json 资源入口"));
+            }
+        } else if m.is_lyrics_style() {
+            if m.entry != "lyrics-style.json" || m.refresh_seconds != default_refresh()
+                || !m.permissions.is_empty() || m.material.is_some()
+            {
+                return Err(fail("歌词样式只支持无权限的 lyrics-style.json 资源入口"));
             }
         } else if m.runtime == "assets" {
             if !m.is_page_shortcuts()
@@ -821,6 +860,7 @@ impl Package {
             appearance: OnceLock::new(),
         };
         package.validate_mail_view()?;
+        package.validate_lyrics_style()?;
         package.validate_page_shortcut_colors()?;
         package.validate_appearance()?;
         #[cfg(windows)]
@@ -861,6 +901,83 @@ impl Package {
             self.mail_view(&Values::new())?;
         }
         Ok(())
+    }
+
+    fn validate_lyrics_style(&self) -> Result<()> {
+        if self.manifest.is_lyrics_style() {
+            self.lyrics_style(&Values::new())?;
+        }
+        Ok(())
+    }
+
+    fn lyrics_style(&self, values: &Values) -> Result<crate::model::LyricsStyle> {
+        let layout: LyricsStyleEntry = serde_json::from_str(&self.source)
+            .map_err(|_| fail("无效的歌词样式入口"))?;
+        if layout.version != 1 {
+            return Err(fail("不支持的歌词样式版本"));
+        }
+        let default_color = crate::model::LyricColor::try_parse(&layout.default_color)
+            .ok_or_else(|| fail("歌词样式默认颜色无效"))?;
+        let default_custom = crate::model::parse_hex_rgb(&layout.default_custom_color)
+            .ok_or_else(|| fail("歌词样式默认自定义色号必须为 #RRGGBB"))?;
+        let mut style = crate::model::LyricsStyle {
+            karaoke: layout.karaoke,
+            color: default_color,
+            custom_color: default_custom,
+            expanded: layout.expanded,
+        };
+        if let Some(key) = layout.enabled_setting.as_deref() {
+            let Some(field) = self.manifest.settings.iter().find(|f| f.key == key && f.kind == "switch") else {
+                return Err(fail("歌词样式引用了不存在或类型不符的开关设置"));
+            };
+            let value = values.get(key).unwrap_or(&field.default);
+            if !valid_field(field, value) {
+                return Err(fail("歌词样式开关设置值无效"));
+            }
+            style.karaoke = value == "true";
+        }
+        if let Some(key) = layout.color_setting.as_deref() {
+            let Some(field) = self.manifest.settings.iter().find(|f| f.key == key && f.kind == "choice") else {
+                return Err(fail("歌词样式引用了不存在或类型不符的颜色选项设置"));
+            };
+            let choices_ok = field.choices.as_ref().is_some_and(|list| {
+                !list.is_empty() && list.iter().all(|c| crate::model::LyricColor::try_parse(&c.value).is_some())
+            });
+            if !choices_ok {
+                return Err(fail("歌词样式颜色选项包含不受支持的配色键名"));
+            }
+            let value = values.get(key).unwrap_or(&field.default);
+            if !valid_field(field, value) {
+                return Err(fail("歌词样式颜色设置值无效"));
+            }
+            style.color = crate::model::LyricColor::parse(value);
+        }
+        if let Some(key) = layout.custom_color_setting.as_deref() {
+            let Some(field) = self.manifest.settings.iter().find(|f| f.key == key && f.kind == "text") else {
+                return Err(fail("歌词样式引用了不存在或类型不符的自定义色号设置"));
+            };
+            if crate::model::parse_hex_rgb(&field.default).is_none() {
+                return Err(fail("歌词样式自定义色号默认值必须为 #RRGGBB"));
+            }
+            let value = values.get(key).unwrap_or(&field.default);
+            if !valid_field(field, value) {
+                return Err(fail("歌词样式自定义色号设置值无效"));
+            }
+            if let Some(rgb) = crate::model::parse_hex_rgb(value) {
+                style.custom_color = rgb;
+            }
+        }
+        if let Some(key) = layout.expanded_setting.as_deref() {
+            let Some(field) = self.manifest.settings.iter().find(|f| f.key == key && f.kind == "switch") else {
+                return Err(fail("歌词样式引用了不存在或类型不符的展开歌词开关设置"));
+            };
+            let value = values.get(key).unwrap_or(&field.default);
+            if !valid_field(field, value) {
+                return Err(fail("歌词样式展开歌词开关值无效"));
+            }
+            style.expanded = value == "true";
+        }
+        Ok(style)
     }
 
     fn mail_view(&self, values: &Values) -> Result<crate::mail_manage_ui::MailView> {
@@ -1292,6 +1409,12 @@ impl LocalPlugins {
         {
             return Err(fail("只能启用一个邮箱视图，请先停用当前使用的插件"));
         }
+        if r.enabled && r.package.as_ref().is_some_and(|p| p.manifest.is_lyrics_style())
+            && self.records.iter().any(|(other, record)| other != id && record.enabled
+                && record.package.as_ref().is_some_and(|p| p.manifest.is_lyrics_style()))
+        {
+            return Err(fail("只能启用一个歌词样式，请先停用当前使用的插件"));
+        }
         let shortcuts_changed = r.is_page_shortcuts()
             || self.records.get(id).is_some_and(Record::is_page_shortcuts);
         if r.enabled
@@ -1331,6 +1454,12 @@ impl LocalPlugins {
         let (id, record) = self.records.iter().find(|(_, record)| record.enabled
             && record.package.as_ref().is_some_and(|package| package.manifest.is_mail_view()))?;
         Some((id.as_str(), record.package.as_ref()?.mail_view(&record.values).ok()?))
+    }
+
+    pub(crate) fn active_lyrics_style(&self) -> Option<(&str, crate::model::LyricsStyle)> {
+        let (id, record) = self.records.iter().find(|(_, record)| record.enabled
+            && record.package.as_ref().is_some_and(|package| package.manifest.is_lyrics_style()))?;
+        Some((id.as_str(), record.package.as_ref()?.lyrics_style(&record.values).ok()?))
     }
 
     pub(crate) fn active_page_shortcut_colors(&self) -> Option<&BTreeMap<String, [u8; 3]>> {

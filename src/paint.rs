@@ -14,6 +14,186 @@ pub enum H {
     Right,
 }
 
+/// 逐字/逐行卡拉 OK 变色绘制：
+/// - 未唱部分保持 `unsung`（通常为白色，按当前皮肤自动换色）；
+/// - 已唱部分按真实字形边界与逻辑→视觉双向映射精确切分（支持比例字体、词间静默与混排 RTL），
+///   通过互补裁剪区避免双层抗锯齿白边，并登记专用前景换色以在浅色皮肤保持可读对比度。
+#[allow(clippy::too_many_arguments)]
+pub fn karaoke_galley(
+    painter: &egui::Painter,
+    position: Pos2,
+    galley: std::sync::Arc<egui::Galley>,
+    unsung: Color32,
+    style: crate::model::LyricColor,
+    custom_rgb: [u8; 3],
+    done_chars: f32,
+    visual_map: Option<&[crate::rtl_text::VisualChar]>,
+    phase: f32,
+) {
+    if galley.is_empty() {
+        return;
+    }
+    let total_glyphs: usize = galley.rows.iter().map(|row| row.glyphs.len()).sum();
+    if total_glyphs == 0 {
+        painter.galley(position, galley, unsung);
+        return;
+    }
+
+    let lookup = |cursor: usize| -> crate::rtl_text::VisualChar {
+        visual_map
+            .and_then(|map| map.get(cursor).copied())
+            .unwrap_or(crate::rtl_text::VisualChar {
+                logical_start: cursor,
+                logical_len: 1,
+                rtl: false,
+            })
+    };
+
+    let mut any_sung = false;
+    let mut all_sung = true;
+    let mut cursor = 0usize;
+    for row in &galley.rows {
+        for _ in &row.glyphs {
+            let vc = lookup(cursor);
+            cursor += 1;
+            let frac = ((done_chars - vc.logical_start as f32) / vc.logical_len.max(1) as f32).clamp(0.0, 1.0);
+            if frac > 0.001 {
+                any_sung = true;
+            }
+            if frac < 0.999 {
+                all_sung = false;
+            }
+        }
+    }
+    if !any_sung {
+        painter.galley(position, galley, unsung);
+        return;
+    }
+
+    let mut colored = galley.clone();
+    let (global_min_x, global_max_x) = {
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for row in &colored.rows {
+            if row.visuals.mesh_bounds.is_positive() {
+                lo = lo.min(row.visuals.mesh_bounds.min.x);
+                hi = hi.max(row.visuals.mesh_bounds.max.x);
+            }
+        }
+        if lo.is_finite() && hi > lo { (lo, hi) } else { (0.0, 1.0) }
+    };
+    let mut row_cursor = 0usize;
+    for row in &mut std::sync::Arc::make_mut(&mut colored).rows {
+        let row_rtl = row
+            .glyphs
+            .iter()
+            .enumerate()
+            .find_map(|(idx, _)| {
+                let vc = lookup(row_cursor + idx);
+                (vc.logical_start == 0).then_some(vc.rtl)
+            })
+            .unwrap_or(false);
+        row_cursor += row.glyphs.len();
+        let (min_x, max_x) = if row.visuals.mesh_bounds.is_positive() {
+            (row.visuals.mesh_bounds.min.x, row.visuals.mesh_bounds.max.x)
+        } else {
+            (global_min_x, global_max_x)
+        };
+        let width = (max_x - min_x).max(1.0);
+        for vertex in &mut row.visuals.mesh.vertices {
+            let mut u = ((vertex.pos.x - min_x) / width).clamp(0.0, 1.0);
+            if row_rtl {
+                u = 1.0 - u;
+            }
+            let col = style.color_at(u, phase, custom_rgb);
+            let a = vertex.color.a() as f32 / 255.0;
+            vertex.color = if a < 0.999 { col.gamma_multiply(a) } else { col };
+        }
+    }
+
+    let paint_colored = |clip: Rect, g: std::sync::Arc<egui::Galley>| {
+        if !clip.is_positive() {
+            return;
+        }
+        let ctx = painter.ctx();
+        let layer = painter.layer_id();
+        let from = crate::skin_paint::shape_count(ctx, layer);
+        painter.with_clip_rect(clip).galley(position, g, Color32::WHITE);
+        crate::skin_paint::tone_since(ctx, layer, from, crate::skin_paint::map_lyric_foreground);
+    };
+
+    let base_clip = painter.clip_rect();
+    if all_sung {
+        paint_colored(base_clip, colored);
+        return;
+    }
+
+    let row_count = galley.rows.len();
+    let mut glyph_cursor = 0usize;
+    for (i, row) in galley.rows.iter().enumerate() {
+        let top = if i == 0 {
+            base_clip.top()
+        } else {
+            ((position.y + galley.rows[i - 1].rect.max.y) + (position.y + row.rect.min.y)) * 0.5
+        };
+        let bottom = if i + 1 == row_count {
+            base_clip.bottom()
+        } else {
+            ((position.y + row.rect.max.y) + (position.y + galley.rows[i + 1].rect.min.y)) * 0.5
+        };
+        if row.glyphs.is_empty() {
+            continue;
+        }
+        let mut spans: Vec<(bool, f32, f32)> = Vec::with_capacity(row.glyphs.len() + 1);
+        let push_span = |spans: &mut Vec<(bool, f32, f32)>, is_colored: bool, x0: f32, x1: f32| {
+            if x1 <= x0 {
+                return;
+            }
+            if let Some(last) = spans.last_mut() {
+                if last.0 == is_colored && (x0 - last.2).abs() <= 0.5 {
+                    last.2 = last.2.max(x1);
+                    return;
+                }
+            }
+            spans.push((is_colored, x0, x1));
+        };
+        let last_idx = row.glyphs.len() - 1;
+        for (g_idx, glyph) in row.glyphs.iter().enumerate() {
+            let vc = lookup(glyph_cursor);
+            glyph_cursor += 1;
+            let raw_x0 = position.x + glyph.pos.x;
+            let raw_x1 = raw_x0 + glyph.advance_width.max(0.0);
+            let gx0 = if g_idx == 0 { base_clip.left().min(raw_x0) } else { raw_x0 };
+            let gx1 = if g_idx == last_idx { base_clip.right().max(raw_x1) } else { raw_x1 };
+            let frac = ((done_chars - vc.logical_start as f32) / vc.logical_len.max(1) as f32).clamp(0.0, 1.0);
+            if frac >= 0.999 {
+                push_span(&mut spans, true, gx0, gx1);
+            } else if frac <= 0.001 {
+                push_span(&mut spans, false, gx0, gx1);
+            } else if vc.rtl {
+                let mid = raw_x1 - (raw_x1 - raw_x0) * frac;
+                push_span(&mut spans, false, gx0, mid);
+                push_span(&mut spans, true, mid, gx1);
+            } else {
+                let mid = raw_x0 + (raw_x1 - raw_x0) * frac;
+                push_span(&mut spans, true, gx0, mid);
+                push_span(&mut spans, false, mid, gx1);
+            }
+        }
+        for (is_colored, x0, x1) in spans {
+            let clip = Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, bottom)).intersect(base_clip);
+            if !clip.is_positive() {
+                continue;
+            }
+            if is_colored {
+                paint_colored(clip, colored.clone());
+            } else {
+                painter.with_clip_rect(clip).galley(position, galley.clone(), unsung);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Card<'a> {
     pub ui: &'a egui::Ui,

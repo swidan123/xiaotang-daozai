@@ -1331,3 +1331,101 @@ fn mail_view_is_code_free_scoped_and_follows_activation() -> Result<()> {
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn lyrics_style_is_code_free_scoped_and_follows_activation() -> Result<()> {
+    let root = std::env::temp_dir().join(format!(
+        "daozai-lyrics-style-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+    ));
+    fs::create_dir_all(&root)?;
+    let mut host = LocalPlugins::open(root.join("installed"));
+    let make = |id: &str| -> Result<PathBuf> {
+        let dir = root.join(id);
+        fs::create_dir(&dir)?;
+        fs::write(dir.join(COVER_FILE), include_bytes!("examples/payday/cover.png"))?;
+        fs::write(
+            dir.join("lyrics-style.json"),
+            r#"{"version":1,"karaoke":true,"defaultColor":"rainbow","defaultCustomColor":"#38BDF8","expanded":true,"enabledSetting":"enabled","colorSetting":"color","customColorSetting":"custom_color","expandedSetting":"expanded"}"#,
+        )?;
+        let path = dir.join("plugin.json");
+        fs::write(
+            &path,
+            json!({
+                "id": id, "name": "逐字变色歌词", "author": "swidan123", "version": "1.0.0",
+                "api": 1, "runtime": "assets", "entry": "lyrics-style.json", "cover": COVER_FILE,
+                "owner": "music", "capabilities": ["lyrics.style", "settings"], "dataVersion": 1,
+                "permissions": {}, "settings": [
+                    {"key": "enabled", "label": "歌词逐字变色", "type": "switch", "default": "true"},
+                    {"key": "color", "label": "已唱颜色", "type": "choice", "default": "rainbow", "choices": [
+                        {"value": "rainbow", "label": "彩虹流光"},
+                        {"value": "custom", "label": "自定义色号"}
+                    ]},
+                    {"key": "custom_color", "label": "自定义色号", "type": "text", "default": "#38BDF8"},
+                    {"key": "expanded", "label": "展开歌词同步变色", "type": "switch", "default": "true"}
+                ]
+            })
+            .to_string(),
+        )?;
+        Ok(path)
+    };
+    let first = make("example.lyrics-first")?;
+    let second = make("example.lyrics-second")?;
+    let manifest: Value = serde_json::from_slice(&fs::read(&first)?)?;
+    for (key, val) in [
+        ("permissions", json!({"source.read": "https"})),
+        ("owner", json!("status")),
+        ("capabilities", json!(["lyrics.style", "action"])),
+        ("runtime", json!("js")),
+    ] {
+        let mut test = manifest.clone();
+        test[key] = val;
+        assert!(Manifest::decode(&test.to_string()).is_err());
+    }
+    let pkg = Package::read(&first)?;
+    let default_style = pkg.lyrics_style(&Values::new())?;
+    assert!(default_style.karaoke && default_style.expanded);
+    assert_eq!(default_style.color, crate::model::LyricColor::Rainbow);
+    let custom_style = pkg.lyrics_style(&Values::from([
+        ("color".into(), "custom".into()),
+        ("custom_color".into(), "#007F00".into()),
+        ("expanded".into(), "false".into()),
+    ]))?;
+    assert_eq!(custom_style.color, crate::model::LyricColor::Custom);
+    assert_eq!(custom_style.custom_color, [0, 127, 0]);
+    assert!(!custom_style.expanded);
+    // 非 ASCII 6 字节自定义色号不得 panic，应安全回退默认色号。
+    let fallback_style = pkg.lyrics_style(&Values::from([
+        ("color".into(), "custom".into()),
+        ("custom_color".into(), "a中aa".into()),
+    ]))?;
+    assert_eq!(fallback_style.custom_color, [56, 189, 248]);
+
+    let entry = first.with_file_name("lyrics-style.json");
+    let original = fs::read(&entry)?;
+    for raw in [
+        r#"{"version":1,"unknown":true}"#,
+        r#"{"version":1,"defaultColor":"invalid"}"#,
+        r#"{"version":1,"colorSetting":"not-declared"}"#,
+        r#"{"version":2}"#,
+    ] {
+        fs::write(&entry, raw)?;
+        assert!(Package::read(&first).is_err());
+    }
+    fs::write(&entry, original)?;
+
+    host.install(&first)?;
+    host.install(&second)?;
+    host.enable("example.lyrics-first", true)?;
+    assert_eq!(host.active_lyrics_style().unwrap().0, "example.lyrics-first");
+    assert!(host.enable("example.lyrics-second", true).is_err());
+    host.enable("example.lyrics-first", false)?;
+    assert!(host.active_lyrics_style().is_none());
+    host.enable("example.lyrics-second", true)?;
+    assert_eq!(host.active_lyrics_style().unwrap().0, "example.lyrics-second");
+    host.uninstall("example.lyrics-second", false)?;
+    assert!(host.active_lyrics_style().is_none());
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
