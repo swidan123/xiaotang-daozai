@@ -1540,9 +1540,9 @@ fn lyric_color_picker(
             Color32::WHITE,
             *selected,
             *custom_rgb,
-            demo_progress,
+            demo_progress * sample.chars().count() as f32,
+            None,
             phase,
-            false,
         );
         if crate::bar_layout::animations_enabled() {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));

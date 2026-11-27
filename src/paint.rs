@@ -15,9 +15,9 @@ pub enum H {
 }
 
 /// 逐字/逐行卡拉 OK 变色绘制：
-/// - 未唱部分保持 `unsung`（通常为白色）；
-/// - 已唱部分按 `style`（单色 / 自定义 / 彩虹与渐变）填充，并通过互补裁剪区精确切分，
-///   避免双层抗锯齿叠画产生的白边。
+/// - 未唱部分保持 `unsung`（通常为白色，按当前皮肤自动换色）；
+/// - 已唱部分按真实字形边界与逻辑→视觉双向映射精确切分（支持比例字体、词间静默与混排 RTL），
+///   通过互补裁剪区避免双层抗锯齿白边，并登记专用前景换色以在浅色皮肤保持可读对比度。
 #[allow(clippy::too_many_arguments)]
 pub fn karaoke_galley(
     painter: &egui::Painter,
@@ -26,15 +26,46 @@ pub fn karaoke_galley(
     unsung: Color32,
     style: crate::model::LyricColor,
     custom_rgb: [u8; 3],
-    progress: f32,
+    done_chars: f32,
+    visual_map: Option<&[crate::rtl_text::VisualChar]>,
     phase: f32,
-    rtl: bool,
 ) {
     if galley.is_empty() {
         return;
     }
-    let progress = progress.clamp(0.0, 1.0);
-    if progress <= 0.001 {
+    let total_glyphs: usize = galley.rows.iter().map(|row| row.glyphs.len()).sum();
+    if total_glyphs == 0 {
+        painter.galley(position, galley, unsung);
+        return;
+    }
+
+    let lookup = |cursor: usize| -> crate::rtl_text::VisualChar {
+        visual_map
+            .and_then(|map| map.get(cursor).copied())
+            .unwrap_or(crate::rtl_text::VisualChar {
+                logical_start: cursor,
+                logical_len: 1,
+                rtl: false,
+            })
+    };
+
+    let mut any_sung = false;
+    let mut all_sung = true;
+    let mut cursor = 0usize;
+    for row in &galley.rows {
+        for _ in &row.glyphs {
+            let vc = lookup(cursor);
+            cursor += 1;
+            let frac = ((done_chars - vc.logical_start as f32) / vc.logical_len.max(1) as f32).clamp(0.0, 1.0);
+            if frac > 0.001 {
+                any_sung = true;
+            }
+            if frac < 0.999 {
+                all_sung = false;
+            }
+        }
+    }
+    if !any_sung {
         painter.galley(position, galley, unsung);
         return;
     }
@@ -51,7 +82,18 @@ pub fn karaoke_galley(
         }
         if lo.is_finite() && hi > lo { (lo, hi) } else { (0.0, 1.0) }
     };
+    let mut row_cursor = 0usize;
     for row in &mut std::sync::Arc::make_mut(&mut colored).rows {
+        let row_rtl = row
+            .glyphs
+            .iter()
+            .enumerate()
+            .find_map(|(idx, _)| {
+                let vc = lookup(row_cursor + idx);
+                (vc.logical_start == 0).then_some(vc.rtl)
+            })
+            .unwrap_or(false);
+        row_cursor += row.glyphs.len();
         let (min_x, max_x) = if row.visuals.mesh_bounds.is_positive() {
             (row.visuals.mesh_bounds.min.x, row.visuals.mesh_bounds.max.x)
         } else {
@@ -60,7 +102,7 @@ pub fn karaoke_galley(
         let width = (max_x - min_x).max(1.0);
         for vertex in &mut row.visuals.mesh.vertices {
             let mut u = ((vertex.pos.x - min_x) / width).clamp(0.0, 1.0);
-            if rtl {
+            if row_rtl {
                 u = 1.0 - u;
             }
             let col = style.color_at(u, phase, custom_rgb);
@@ -69,74 +111,85 @@ pub fn karaoke_galley(
         }
     }
 
-    if progress >= 0.999 {
-        painter.galley(position, colored, Color32::WHITE);
-        return;
-    }
-
-    let total_w: f32 = galley
-        .rows
-        .iter()
-        .map(|row| row.visuals.mesh_bounds.width().max(0.0))
-        .sum();
-    if total_w <= 0.0 {
-        painter.galley(position, galley, unsung);
-        return;
-    }
+    let paint_colored = |clip: Rect, g: std::sync::Arc<egui::Galley>| {
+        if !clip.is_positive() {
+            return;
+        }
+        let ctx = painter.ctx();
+        let layer = painter.layer_id();
+        let from = crate::skin_paint::shape_count(ctx, layer);
+        painter.with_clip_rect(clip).galley(position, g, Color32::WHITE);
+        crate::skin_paint::tone_since(ctx, layer, from, crate::skin_paint::map_lyric_foreground);
+    };
 
     let base_clip = painter.clip_rect();
-    let mut remaining = total_w * progress;
+    if all_sung {
+        paint_colored(base_clip, colored);
+        return;
+    }
+
     let row_count = galley.rows.len();
+    let mut glyph_cursor = 0usize;
     for (i, row) in galley.rows.iter().enumerate() {
-        let b = row.visuals.mesh_bounds;
         let top = if i == 0 {
             base_clip.top()
         } else {
-            ((position.y + galley.rows[i - 1].visuals.mesh_bounds.max.y) + (position.y + b.min.y)) * 0.5
+            ((position.y + galley.rows[i - 1].rect.max.y) + (position.y + row.rect.min.y)) * 0.5
         };
         let bottom = if i + 1 == row_count {
             base_clip.bottom()
         } else {
-            ((position.y + b.max.y) + (position.y + galley.rows[i + 1].visuals.mesh_bounds.min.y)) * 0.5
+            ((position.y + row.rect.max.y) + (position.y + galley.rows[i + 1].rect.min.y)) * 0.5
         };
-        let row_w = b.width().max(0.0);
-        if remaining >= row_w {
-            let clip = Rect::from_min_max(Pos2::new(base_clip.left(), top), Pos2::new(base_clip.right(), bottom))
-                .intersect(base_clip);
-            if clip.is_positive() {
-                painter.with_clip_rect(clip).galley(position, colored.clone(), Color32::WHITE);
+        if row.glyphs.is_empty() {
+            continue;
+        }
+        let mut spans: Vec<(bool, f32, f32)> = Vec::with_capacity(row.glyphs.len() + 1);
+        let push_span = |spans: &mut Vec<(bool, f32, f32)>, is_colored: bool, x0: f32, x1: f32| {
+            if x1 <= x0 {
+                return;
             }
-            remaining -= row_w;
-        } else if remaining <= 0.0 {
-            let clip = Rect::from_min_max(Pos2::new(base_clip.left(), top), Pos2::new(base_clip.right(), bottom))
-                .intersect(base_clip);
-            if clip.is_positive() {
+            if let Some(last) = spans.last_mut() {
+                if last.0 == is_colored && (x0 - last.2).abs() <= 0.5 {
+                    last.2 = last.2.max(x1);
+                    return;
+                }
+            }
+            spans.push((is_colored, x0, x1));
+        };
+        let last_idx = row.glyphs.len() - 1;
+        for (g_idx, glyph) in row.glyphs.iter().enumerate() {
+            let vc = lookup(glyph_cursor);
+            glyph_cursor += 1;
+            let raw_x0 = position.x + glyph.pos.x;
+            let raw_x1 = raw_x0 + glyph.advance_width.max(0.0);
+            let gx0 = if g_idx == 0 { base_clip.left().min(raw_x0) } else { raw_x0 };
+            let gx1 = if g_idx == last_idx { base_clip.right().max(raw_x1) } else { raw_x1 };
+            let frac = ((done_chars - vc.logical_start as f32) / vc.logical_len.max(1) as f32).clamp(0.0, 1.0);
+            if frac >= 0.999 {
+                push_span(&mut spans, true, gx0, gx1);
+            } else if frac <= 0.001 {
+                push_span(&mut spans, false, gx0, gx1);
+            } else if vc.rtl {
+                let mid = raw_x1 - (raw_x1 - raw_x0) * frac;
+                push_span(&mut spans, false, gx0, mid);
+                push_span(&mut spans, true, mid, gx1);
+            } else {
+                let mid = raw_x0 + (raw_x1 - raw_x0) * frac;
+                push_span(&mut spans, true, gx0, mid);
+                push_span(&mut spans, false, mid, gx1);
+            }
+        }
+        for (is_colored, x0, x1) in spans {
+            let clip = Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, bottom)).intersect(base_clip);
+            if !clip.is_positive() {
+                continue;
+            }
+            if is_colored {
+                paint_colored(clip, colored.clone());
+            } else {
                 painter.with_clip_rect(clip).galley(position, galley.clone(), unsung);
             }
-        } else {
-            let row_left = position.x + b.min.x;
-            let row_right = position.x + b.max.x;
-            let split_x = if rtl { row_right - remaining } else { row_left + remaining };
-            let left_clip = Rect::from_min_max(Pos2::new(base_clip.left(), top), Pos2::new(split_x, bottom))
-                .intersect(base_clip);
-            let right_clip = Rect::from_min_max(Pos2::new(split_x, top), Pos2::new(base_clip.right(), bottom))
-                .intersect(base_clip);
-            if rtl {
-                if right_clip.is_positive() {
-                    painter.with_clip_rect(right_clip).galley(position, colored.clone(), Color32::WHITE);
-                }
-                if left_clip.is_positive() {
-                    painter.with_clip_rect(left_clip).galley(position, galley.clone(), unsung);
-                }
-            } else {
-                if left_clip.is_positive() {
-                    painter.with_clip_rect(left_clip).galley(position, colored.clone(), Color32::WHITE);
-                }
-                if right_clip.is_positive() {
-                    painter.with_clip_rect(right_clip).galley(position, galley.clone(), unsung);
-                }
-            }
-            remaining = 0.0;
         }
     }
 }

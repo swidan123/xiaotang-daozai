@@ -290,7 +290,7 @@ impl LyricColor {
 
 pub fn parse_hex_rgb(raw: &str) -> Option<[u8; 3]> {
     let s = raw.trim().strip_prefix('#').unwrap_or(raw.trim());
-    if s.len() != 6 {
+    if s.len() != 6 || !s.is_ascii() || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let r = u8::from_str_radix(&s[0..2], 16).ok()?;

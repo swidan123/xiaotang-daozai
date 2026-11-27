@@ -2681,6 +2681,128 @@ fn karaoke_lyrics_color_sweep_and_settings_persist() {
 }
 
 #[test]
+fn karaoke_regressions_non_ascii_hex_proportional_glyphs_bidi_and_light_skins() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // 1. P1 回归：6 字节非 ASCII 自定义色不得导致 Settings::load panic，应回退默认色。
+    for bad in ["a中aa", "#a中aa", "中中", "GGGGGG", "#12345"] {
+        assert_eq!(crate::model::parse_hex_rgb(bad), None, "非法色值应返回 None: {bad}");
+    }
+    assert_eq!(crate::model::parse_hex_rgb("#007F00"), Some([0, 127, 0]));
+    std::fs::write(crate::model::config_dir().join("settings.txt"), "lyric_custom_color=a中aa\n").unwrap();
+    let loaded = crate::model::Settings::load();
+    assert_eq!(loaded.lyric_custom_color, crate::model::Settings::default().lyric_custom_color);
+
+    // 2. P2 回归：比例字体 iiiiWWWW 在词间静默（t=3.0s，已唱 4/8 字）时，
+    //    裁剪切分点必须落在第 4 个 'i' 的末端，不得按 50% 像素宽侵入 'W'。
+    let mut h = H::new();
+    h.app.settings.island_lyrics = true;
+    h.app.settings.lyric_karaoke = true;
+    h.app.settings.lyric_delay_ms = 0;
+    h.app.settings.lyric_color = crate::model::LyricColor::SkyBlue;
+    h.media = crate::smtc::NowPlaying {
+        title: "Track".into(),
+        artist: "Artist".into(),
+        position: 3.0,
+        duration: 60.0,
+        playing: true,
+        ..Default::default()
+    };
+    h.app.set_lyrics(
+        "Track",
+        "Artist",
+        60.0,
+        crate::lyrics::parse_lrc("[00:01.00]placeholder"),
+    );
+    // 直接构造带词间静默的 KRC 歌词。
+    let mut krc = crate::lyrics::Lyrics::default();
+    krc.synced = true;
+    krc.lines.push(crate::lyrics::LyricsLine {
+        t: 1.0,
+        text: "iiiiWWWW".into(),
+        end: Some(6.0),
+        start_shift: 0.0,
+        words: vec![
+            crate::lyrics::LyricWord { offset: 0.0, duration: 1.0, chars: 4 },
+            crate::lyrics::LyricWord { offset: 4.0, duration: 1.0, chars: 4 },
+        ],
+    });
+    h.app.set_lyrics("Track", "Artist", 60.0, krc);
+    for _ in 0..8 { h.frame(vec![]); }
+    let prop_shapes: Vec<_> = h.shapes.iter().filter_map(|s| match &s.shape {
+        egui::Shape::Text(t) if t.galley.text() == "iiiiWWWW" => Some((s.clip_rect, t)),
+        _ => None,
+    }).collect();
+    assert_eq!(prop_shapes.len(), 2, "词间静默应拆成已唱 iiii 和未唱 WWWW 两段");
+    let row = &prop_shapes[0].1.galley.rows[0];
+    let pos_x = prop_shapes[0].1.pos.x;
+    let fourth_i_end = pos_x + row.glyphs[3].pos.x + row.glyphs[3].advance_width;
+    let mid_pixel_x = pos_x + row.visuals.mesh_bounds.center().x;
+    assert!(
+        (prop_shapes[0].0.right() - fourth_i_end).abs() < 0.5,
+        "切分点应精准对齐第 4 个 i 末端：clip_right={} vs fourth_i_end={fourth_i_end}",
+        prop_shapes[0].0.right()
+    );
+    assert!(
+        prop_shapes[0].0.right() < mid_pixel_x - 2.0,
+        "iiii 显著窄于 WWWW，切分点必须远小于总像素中点 {mid_pixel_x}"
+    );
+
+    // 3. P2 回归：LTR 开头的双向混排歌词 `AAAA مرحبا` 在唱到 AAAA 中段时，
+    //    必须先给左侧的 AAAA 着色，右侧阿拉伯语保持未唱白色。
+    let mut bidi = crate::lyrics::Lyrics::default();
+    bidi.synced = true;
+    bidi.lines.push(crate::lyrics::LyricsLine {
+        t: 1.0,
+        text: "AAAA مرحبا".into(),
+        end: Some(6.0),
+        start_shift: 0.0,
+        words: vec![
+            crate::lyrics::LyricWord { offset: 0.0, duration: 2.0, chars: 5 },
+            crate::lyrics::LyricWord { offset: 3.0, duration: 2.0, chars: 5 },
+        ],
+    });
+    h.media.position = 2.0; // 已唱 2.5 个字符（位于左侧 AAAA 中段）
+    h.app.set_lyrics("Track", "Artist", 60.0, bidi);
+    for _ in 0..8 { h.frame(vec![]); }
+    let bidi_shapes: Vec<_> = h.shapes.iter().filter_map(|s| match &s.shape {
+        egui::Shape::Text(t) if t.galley.text().starts_with("AAAA") => Some((s.clip_rect, t)),
+        _ => None,
+    }).collect();
+    assert_eq!(bidi_shapes.len(), 2, "混排首词中段应拆为左侧已唱与右侧未唱两段");
+    let left_col = bidi_shapes[0].1.galley.rows[0].visuals.mesh.vertices[0].color;
+    let right_col = bidi_shapes[1].1.galley.rows[0].visuals.mesh.vertices[0].color;
+    assert_ne!(left_col, crate::theme::WHITE, "左侧 AAAA 应先着已唱色");
+    assert_eq!(right_col, crate::theme::WHITE, "右侧未唱阿拉伯语应保持白色");
+    assert!(bidi_shapes[0].0.right() <= bidi_shapes[1].0.left() + 0.5);
+
+    // 4. P2 回归：浅色皮肤（奶油 / 浅色毛玻璃）+ 深绿自定义色 `#007F00` 经 skin_paint 后必须保持高对比度。
+    for (skin, paper) in [
+        (crate::model::Skin::Cream, crate::skin_paint::CREAM.paper),
+        (crate::model::Skin::GlassLight, crate::skin_paint::GLASS_LIGHT.paper),
+    ] {
+        h.app.settings.skin = skin;
+        h.app.settings.lyric_color = crate::model::LyricColor::Custom;
+        h.app.settings.lyric_custom_color = [0, 127, 0];
+        h.media.position = 5.5;
+        h.app.set_lyrics("Track", "Artist", 60.0, crate::lyrics::parse_lrc("[00:01.00]深绿可读测试\n[00:05.00]下一句"));
+        h.media.position = 4.9;
+        for _ in 0..8 { h.frame(vec![]); }
+        let colored = h.shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text() == "深绿可读测试" => {
+                t.galley.rows.first().and_then(|r| r.visuals.mesh.vertices.first()).map(|v| v.color)
+            }
+            _ => None,
+        }).expect("应渲染已唱歌词");
+        let p = [paper[0] as f32 / 255.0, paper[1] as f32 / 255.0, paper[2] as f32 / 255.0];
+        let fg = [colored.r() as f32 / 255.0, colored.g() as f32 / 255.0, colored.b() as f32 / 255.0];
+        let cr = crate::glass::contrast(fg, p);
+        assert!(cr >= 3.2, "{skin:?} 下深绿自定义歌词对比度退化为 {cr:.2}（color={colored:?}）");
+        assert!(colored.g() > colored.r() && colored.g() > colored.b(), "{skin:?} 下应保留绿色色相，实际 {colored:?}");
+    }
+}
+
+#[test]
 fn island_lyrics_center_segments_in_a_fixed_height(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();h.app.settings.island_lyrics=true;

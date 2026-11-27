@@ -903,8 +903,8 @@ pub struct App {
     pub(crate) ly_worker: Option<std::thread::JoinHandle<()>>,
     pub(crate) show_lyrics: bool,
     island_lyric_layout: Option<std::sync::Arc<egui::Galley>>,
-    island_lyric_progress: f32,
-    island_lyric_rtl: bool,
+    island_lyric_done_chars: f32,
+    island_lyric_visual_map: Option<Vec<crate::rtl_text::VisualChar>>,
     media_anchor: (String, f64, f64, bool),
     pub(crate) media: NowPlaying,
     pub(crate) music_artwork: Option<(std::sync::Arc<egui::ColorImage>,egui::TextureHandle)>,
@@ -1133,8 +1133,8 @@ impl App {
             ly_worker: None,
             show_lyrics: initial_lyrics,
             island_lyric_layout: None,
-            island_lyric_progress: 0.0,
-            island_lyric_rtl: false,
+            island_lyric_done_chars: 0.0,
+            island_lyric_visual_map: None,
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
@@ -2094,7 +2094,7 @@ impl App {
     }
 
     fn update_island_lyric_layout(&mut self,ctx:&egui::Context) {
-        if !self.island_lyrics_active(){self.island_lyric_layout=None;return;}
+        if !self.island_lyrics_active(){self.island_lyric_layout=None;self.island_lyric_done_chars=0.0;self.island_lyric_visual_map=None;return;}
         let current=self.island_lyric();
         let limited=self.music_lyrics_limited();
         let lyrics=self.ly.lyrics.as_ref().filter(|lyrics|!limited && lyric_key_matches(&self.ly.key,&self.media)
@@ -2106,50 +2106,59 @@ impl App {
                 else {"间奏"}
             } else {self.media.title.trim()};
         let ink=if current.is_some()||title{theme::WHITE}else{theme::GRAY};
-        let layout=|text:String| {
-            // 维语等从右往左的歌词：先按阅读顺序分行再逐行转换，否则折行后第一行会是句子的结尾（#200）。
-            let font=theme::font(11.0,W::Semibold);
-            let text=crate::rtl_text::display_wrapped(&text,LYRIC_BAR_W-80.0,|s|ctx.fonts(|fonts|fonts.layout_no_wrap(s.to_owned(),font.clone(),ink).size().x)).into_owned();
-            let mut job=egui::text::LayoutJob::simple(text,font,ink,LYRIC_BAR_W-80.0);
+        let font=theme::font(11.0,W::Semibold);
+        let layout_plain=|text:String| {
+            let mut job=egui::text::LayoutJob::simple(text,font.clone(),ink,LYRIC_BAR_W-80.0);
             job.halign=egui::Align::Center;
             job.wrap.break_anywhere=true;
             if title {job.wrap.max_rows=1;}
             ctx.fonts(|fonts|fonts.layout_job(job))
         };
-        let mut galley=layout(text.to_owned());
-        let mut progress=0.0f32;
-        let mut rtl=false;
-        if let Some((index,line))=current {
+        // 维语等从右往左的歌词：先按阅读顺序分行再逐行转换，并保留逻辑→视觉字符映射（#200）。
+        let (wrapped_text,mut visual_map)=crate::rtl_text::display_wrapped_with_map(text,LYRIC_BAR_W-80.0,|s|ctx.fonts(|fonts|fonts.layout_no_wrap(s.to_owned(),font.clone(),ink).size().x));
+        let mut galley=layout_plain(wrapped_text);
+        let mut done_chars=0.0f32;
+        if let Some((index,_))=current {
             let lyrics=self.ly.lyrics.as_ref().unwrap();
-            let line_progress=lyrics.line_progress(index,self.lyric_position(),self.media.duration as f32);
-            rtl=crate::rtl_text::has_rtl(line);
+            let (line_done,total_chars)=lyrics.line_char_progress(index,self.lyric_position(),self.media.duration as f32);
             if galley.rows.len()>1 {
                 // 按当前句的时间范围与各段字数切换，暂停和跳转直接跟随播放位置。
+                let line_progress=if total_chars>0 {(line_done/total_chars as f32).clamp(0.0,1.0)}else{0.0};
                 let total:usize=galley.rows.iter().map(|row|row.glyphs.len()).sum();
                 let mut count=0usize;
                 let mut seg_start=0usize;
-                let mut seg_len=1usize;
                 let page=galley.rows.iter().position(|row|{
                     seg_start=count;
-                    seg_len=row.glyphs.len().max(1);
                     count+=row.glyphs.len();
                     line_progress*(total as f32)<count as f32
                 }).unwrap_or_else(||{
                     let last=galley.rows.len()-1;
                     let last_len=galley.rows[last].glyphs.len();
                     seg_start=total.saturating_sub(last_len);
-                    seg_len=last_len.max(1);
                     last
                 });
-                let segment=galley.rows[page].glyphs.iter().map(|glyph|glyph.chr).collect::<String>();
-                galley=layout(segment.trim().to_owned());
-                progress=((line_progress*(total as f32)-seg_start as f32)/seg_len as f32).clamp(0.0,1.0);
+                let raw_segment=galley.rows[page].glyphs.iter().map(|glyph|glyph.chr).collect::<String>();
+                let trimmed=raw_segment.trim();
+                let start_byte=trimmed.as_ptr() as usize - raw_segment.as_ptr() as usize;
+                let lead_trim=raw_segment[..start_byte].chars().count();
+                let kept=trimmed.chars().count();
+                galley=layout_plain(trimmed.to_owned());
+                if let Some(map)=visual_map.take() {
+                    let from=(seg_start+lead_trim).min(map.len());
+                    let to=(from+kept).min(map.len());
+                    visual_map=Some(map[from..to].to_vec());
+                    done_chars=line_done;
+                } else {
+                    done_chars=(line_done-(seg_start+lead_trim) as f32).max(0.0);
+                }
             } else {
-                progress=line_progress;
+                done_chars=line_done;
             }
+        } else {
+            visual_map=None;
         }
-        self.island_lyric_rtl=rtl;
-        self.island_lyric_progress=progress;
+        self.island_lyric_done_chars=done_chars;
+        self.island_lyric_visual_map=visual_map;
         self.island_lyric_layout=Some(galley);
     }
 
@@ -3736,7 +3745,7 @@ impl App {
             let position=c.pos(left+content_width-LYRIC_BAR_W/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
             if lyric.is_some() && self.settings.lyric_karaoke {
                 let phase=if crate::bar_layout::animations_enabled() {(self.t*0.22) as f32}else{0.0};
-                paint::karaoke_galley(&c.painter,position,galley,theme::WHITE,self.settings.lyric_color,self.settings.lyric_custom_color,self.island_lyric_progress,phase,self.island_lyric_rtl);
+                paint::karaoke_galley(&c.painter,position,galley,theme::WHITE,self.settings.lyric_color,self.settings.lyric_custom_color,self.island_lyric_done_chars,self.island_lyric_visual_map.as_deref(),phase);
             } else {
                 c.painter.galley(position,galley,if lyric.is_some(){theme::WHITE}else{theme::GRAY});
             }
