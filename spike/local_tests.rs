@@ -1347,23 +1347,20 @@ fn lyrics_style_is_code_free_scoped_and_follows_activation() -> Result<()> {
         fs::write(dir.join(COVER_FILE), include_bytes!("examples/payday/cover.png"))?;
         fs::write(
             dir.join("lyrics-style.json"),
-            r##"{"version":1,"karaoke":true,"defaultColor":"rainbow","defaultCustomColor":"#38BDF8","expanded":true,"enabledSetting":"enabled","colorSetting":"color","customColorSetting":"custom_color","expandedSetting":"expanded"}"##,
+            r##"{"version":1,"island":true,"expanded":true,"defaultColor":"rainbow","defaultCustomColor":"#38BDF8","islandSetting":"island_enabled","expandedSetting":"expanded_enabled","colorSetting":"color","customColorSetting":"custom_color"}"##,
         )?;
         let path = dir.join("plugin.json");
         fs::write(
             &path,
             json!({
-                "id": id, "name": "逐字变色歌词", "author": "swidan123", "version": "1.0.0",
+                "id": id, "name": "逐字变色歌词", "author": "swidan123", "version": "1.0.1",
                 "api": 1, "runtime": "assets", "entry": "lyrics-style.json", "cover": COVER_FILE,
                 "owner": "music", "capabilities": ["lyrics.style", "settings"], "dataVersion": 1,
                 "permissions": {}, "settings": [
-                    {"key": "enabled", "label": "歌词逐字变色", "type": "switch", "default": "true"},
-                    {"key": "color", "label": "已唱颜色", "type": "choice", "default": "rainbow", "choices": [
-                        {"value": "rainbow", "label": "彩虹流光"},
-                        {"value": "custom", "label": "自定义色号"}
-                    ]},
-                    {"key": "custom_color", "label": "自定义色号", "type": "text", "default": "#38BDF8"},
-                    {"key": "expanded", "label": "展开歌词同步变色", "type": "switch", "default": "true"}
+                    {"key": "island_enabled", "label": "岛上歌词逐字变色", "type": "switch", "default": "true"},
+                    {"key": "expanded_enabled", "label": "展开歌词逐字变色", "type": "switch", "default": "true"},
+                    {"key": "color", "label": "已唱颜色", "type": "text", "default": "rainbow"},
+                    {"key": "custom_color", "label": "自定义色号", "type": "text", "default": "#38BDF8"}
                 ]
             })
             .to_string(),
@@ -1385,16 +1382,24 @@ fn lyrics_style_is_code_free_scoped_and_follows_activation() -> Result<()> {
     }
     let pkg = Package::read(&first)?;
     let default_style = pkg.lyrics_style(&Values::new())?;
-    assert!(default_style.karaoke && default_style.expanded);
+    assert!(default_style.island && default_style.expanded);
     assert_eq!(default_style.color, crate::model::LyricColor::Rainbow);
     let custom_style = pkg.lyrics_style(&Values::from([
+        ("island_enabled".into(), "false".into()),
+        ("expanded_enabled".into(), "true".into()),
         ("color".into(), "custom".into()),
         ("custom_color".into(), "#007F00".into()),
-        ("expanded".into(), "false".into()),
     ]))?;
+    assert!(!custom_style.island && custom_style.expanded);
     assert_eq!(custom_style.color, crate::model::LyricColor::Custom);
     assert_eq!(custom_style.custom_color, [0, 127, 0]);
-    assert!(!custom_style.expanded);
+    let mint_style = pkg.lyrics_style(&Values::from([
+        ("island_enabled".into(), "true".into()),
+        ("expanded_enabled".into(), "false".into()),
+        ("color".into(), "mint_green".into()),
+    ]))?;
+    assert!(mint_style.island && !mint_style.expanded);
+    assert_eq!(mint_style.color, crate::model::LyricColor::MintGreen);
     // 非 ASCII 6 字节自定义色号不得 panic，应安全回退默认色号。
     let fallback_style = pkg.lyrics_style(&Values::from([
         ("color".into(), "custom".into()),

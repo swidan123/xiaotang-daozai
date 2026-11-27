@@ -2426,34 +2426,7 @@ impl App {
                             });
                         });
                         #[cfg(feature="sdk-js")]
-                        {
-                            self.plugins.settings(ui,"music",on);
-                            if on {
-                                if let Some(style)=self.active_lyrics_style() {
-                                    ui.add_space(6.0);
-                                    settings_card(ui,|ui|{
-                                        let ctx=&ui.ctx().clone();
-                                        ui.label(egui::RichText::new("歌词样式预览").size(12.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(75))));
-                                        ui.add_space(4.0);
-                                        let preview_w=ui.available_width().min(360.0).max(200.0);
-                                        let (bar,_)=ui.allocate_exact_size(egui::vec2(preview_w,32.0),egui::Sense::hover());
-                                        ui.painter().rect(bar,16.0,Color32::from_rgb(44,44,48),egui::Stroke::new(1.0,Color32::from_white_alpha(28)),egui::StrokeKind::Inside);
-                                        let sample="你一句轻描淡写就能让我彻夜难平";
-                                        let font=crate::theme::font(12.0,crate::theme::W::Semibold);
-                                        let galley=ui.painter().layout_no_wrap(sample.to_owned(),font,Color32::WHITE);
-                                        let pos=egui::pos2(bar.center().x-galley.size().x/2.0,bar.center().y-galley.size().y/2.0);
-                                        if style.karaoke {
-                                            let demo_progress=if crate::bar_layout::animations_enabled() {((self.t*0.25)%1.0) as f32}else{0.55};
-                                            let phase=if crate::bar_layout::animations_enabled() {(self.t*0.22) as f32}else{0.0};
-                                            crate::paint::karaoke_galley(&ui.painter().with_clip_rect(bar.shrink(4.0)),pos,galley,Color32::WHITE,style.color,style.custom_color,demo_progress*sample.chars().count() as f32,None,phase);
-                                            if crate::bar_layout::animations_enabled() {ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));}
-                                        } else {
-                                            ui.painter().with_clip_rect(bar.shrink(4.0)).galley(pos,galley,Color32::WHITE);
-                                        }
-                                    });
-                                }
-                            }
-                        }
+                        self.plugins.settings(ui,"music",on);
                     }
                     2=>{
                         let on=self.settings_feature_header(ui,crate::app::FOCUS_PAGE,"番茄钟与休息计时",|_,_|{});

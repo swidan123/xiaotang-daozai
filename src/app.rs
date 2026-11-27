@@ -3852,7 +3852,7 @@ impl App {
             let shown=c.ui.ctx().animate_value_with_time(id,index as f32,0.18);
             let fade=1.0-(index as f32-shown).abs().min(1.0);
             let position=c.pos(left+content_width-LYRIC_BAR_W/2.0,center_y-galley.size().y/2.0+(1.0-fade)*3.0);
-            if let Some(style)=lyric.and_then(|_|self.active_lyrics_style()).filter(|s|s.karaoke) {
+            if let Some(style)=lyric.and_then(|_|self.active_lyrics_style()).filter(|s|s.island) {
                 let phase=if crate::bar_layout::animations_enabled() {(self.t*0.22) as f32}else{0.0};
                 paint::karaoke_galley(&c.painter,position,galley,theme::WHITE,style.color,style.custom_color,self.island_lyric_done_chars,self.island_lyric_visual_map.as_deref(),phase);
             } else {

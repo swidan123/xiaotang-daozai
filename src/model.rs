@@ -226,19 +226,21 @@ pub enum LyricColor {
 /// 歌词样式扩展配置（由 `lyrics.style` 声明式资源插件提供；停用或卸载后恢复原生纯白歌词）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LyricsStyle {
-    pub karaoke: bool,
+    /// 岛上单行歌词是否开启逐字变色。
+    pub island: bool,
+    /// 展开音乐页歌词是否开启逐字变色。
+    pub expanded: bool,
     pub color: LyricColor,
     pub custom_color: [u8; 3],
-    pub expanded: bool,
 }
 
 impl Default for LyricsStyle {
     fn default() -> Self {
         Self {
-            karaoke: true,
+            island: true,
+            expanded: true,
             color: LyricColor::Rainbow,
             custom_color: [56, 189, 248],
-            expanded: true,
         }
     }
 }

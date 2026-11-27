@@ -304,7 +304,7 @@ impl App {
                 let row=col.faded((1.0-distance.abs()*0.35).clamp(0.0,1.0));
                 let font=row.font(if active {12.0}else{10.0},if active {W::Semibold}else{W::Regular});
                 // 维语等从右往左的歌词：先按阅读顺序分行再逐行转换，并保留逻辑→视觉字符映射（#200）。
-                let karaoke_style=if active && lyrics.synced {self.active_lyrics_style().filter(|s|s.karaoke && s.expanded)}else{None};
+                let karaoke_style=if active && lyrics.synced {self.active_lyrics_style().filter(|s|s.expanded)}else{None};
                 let (text,visual_map)=if karaoke_style.is_some() {
                     crate::rtl_text::display_wrapped_with_map(&line.text,132.0*c.s,|s|row.painter.layout_no_wrap(s.to_owned(),font.clone(),ink).size().x)
                 } else {
